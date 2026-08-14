@@ -201,6 +201,50 @@ class RunTests(unittest.TestCase):
         self.assertEqual(monitor.poll_count, 2)
         sleep.assert_not_called()
 
+    def test_run_waits_after_synchronization_advances_head(self):
+        initial_pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        synchronized_pull_request = dataclasses.replace(
+            initial_pull_request,
+            head_sha="def456",
+        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = initial_pull_request
+        monitor = mock.Mock()
+        monitor.poll_once.side_effect = lambda: (events.append("poll") or True)
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+        events = []
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+            mock.patch("fix.StateStore"), \
+            mock.patch("fix.AgentLauncher"), \
+            mock.patch("fix.Monitor", return_value=monitor), \
+            mock.patch(
+                "fix.synchronize_pull_request",
+                return_value=synchronized_pull_request,
+            ), \
+            mock.patch("fix.state_lock", return_value=lock), \
+            mock.patch(
+                "fix.sleep_until_next_poll",
+                side_effect=lambda seconds: events.append(("sleep", seconds)),
+            ) as sleep:
+            self.assertEqual(fix.run(), 0)
+
+        self.assertEqual(events, [("sleep", fix.DEFAULT_INTERVAL), "poll"])
+        sleep.assert_called_once_with(fix.DEFAULT_INTERVAL)
+
     def test_run_launches_conflict_agent_and_retries_synchronization(self):
         initial_pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -242,7 +286,8 @@ class RunTests(unittest.TestCase):
                 "fix.synchronize_pull_request",
                 side_effect=[conflict, updated_pull_request],
             ) as synchronize, \
-            mock.patch("fix.state_lock", return_value=lock):
+            mock.patch("fix.state_lock", return_value=lock), \
+            mock.patch("fix.sleep_until_next_poll") as sleep:
             agent_launcher_class.return_value.launch.return_value = 0
             self.assertEqual(fix.run(), 0)
 
@@ -256,6 +301,7 @@ class RunTests(unittest.TestCase):
             "conflict-resolution",
             agent_launcher_class.return_value.launch.call_args.args[0],
         )
+        sleep.assert_called_once_with(fix.DEFAULT_INTERVAL)
         state_store.assert_called_once_with(Path("/tmp/state.json"))
 
     def test_run_explains_missing_workflow_scope(self):

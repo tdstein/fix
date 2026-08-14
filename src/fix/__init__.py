@@ -1125,8 +1125,9 @@ def run(
                 "Synchronizing PR #%d with its base branch before monitoring.",
                 initial_pull_request.number,
             )
+            synchronized_pull_request = initial_pull_request
             try:
-                synchronize_pull_request(
+                synchronized_pull_request = synchronize_pull_request(
                     runner=runner,
                     github=github,
                     workdir=workdir,
@@ -1156,12 +1157,19 @@ def run(
                         returncode,
                     )
                 updated_pull_request = github.get_pull_request(target)
-                synchronize_pull_request(
+                synchronized_pull_request = synchronize_pull_request(
                     runner=runner,
                     github=github,
                     workdir=workdir,
                     pull_request=updated_pull_request,
                 )
+            if synchronized_pull_request.head_sha != initial_pull_request.head_sha:
+                LOGGER.info(
+                    "Waiting for GitHub to recognize the synchronized PR #%d "
+                    "head and start CI before the first poll.",
+                    initial_pull_request.number,
+                )
+                sleep_until_next_poll(DEFAULT_INTERVAL)
         while True:
             if monitor.poll_once():
                 return 0

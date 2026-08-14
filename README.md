@@ -79,12 +79,14 @@ The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
 precedence over environment variables; without either, `fix` uses
 `openai.gpt-5.6-luna` and `max`.
 
-`fix` polls every five minutes, with one immediate follow-up poll whenever a
-repair or review agent exits. It stops when the pull request closes or when all
-checks pass without a new review. When checks are waiting or have no failures,
-it also checks pull request reviews. A review session summarizes feedback with
-you, applies small clearly correct fixes, and pauses for your judgment on
-subjective changes.
+`fix` polls every five minutes. After synchronization advances the pull
+request head, it waits for the next poll so GitHub can recognize the new
+commit and start its checks. It also performs one immediate follow-up poll
+whenever a repair or review agent exits. It stops when the pull request closes
+or when all checks pass without a new review. When checks are waiting or have
+no failures, it also checks pull request reviews. A review session summarizes
+feedback with you, applies small clearly correct fixes, and pauses for your
+judgment on subjective changes.
 
 Before monitoring an open pull request, `fix` asks GitHub to update its branch
 from the pull request's configured base branch, then refreshes the local
