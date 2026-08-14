@@ -8,7 +8,7 @@ PYTHON ?= $(UV) run python
 .PHONY: install uninstall test
 
 install:
-	$(UV) tool install --force "$(PROJECT_DIR)"
+	$(UV) tool install --force --refresh "$(PROJECT_DIR)"
 
 uninstall:
 	-$(UV) tool uninstall fix

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import dataclasses
 from datetime import datetime, timezone
@@ -14,7 +15,6 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-import sys
 import tempfile
 import time
 from typing import Any, Mapping, Optional, Sequence
@@ -27,6 +27,8 @@ DEFAULT_AGENT_TIMEOUT = 2 * 60 * 60
 DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD = 10
 DEFAULT_AGENT_MODEL = "openai.gpt-5.6-luna"
 DEFAULT_AGENT_EFFORT = "max"
+AGENT_MODEL_ENV = "FIX_MODEL"
+AGENT_EFFORT_ENV = "FIX_EFFORT"
 FAILURE_KEY_VERSION = 2
 REVIEW_KEY_VERSION = 1
 FAILURE_BUCKETS = frozenset(("fail", "cancel"))
@@ -454,8 +456,11 @@ def validate_agent_checkout(
     if current_sha != pull_request.head_sha:
         raise MonitorError(
             "Refusing to launch the repair agent: "
-            f"checkout is {current_sha[:12]}, PR head is {pull_request.head_sha[:12]}; "
-            "update the checkout to the PR head."
+            f"checkout is {current_sha[:12]}, PR #{pull_request.number} head is "
+            f"{pull_request.head_sha[:12]}. "
+            "Synchronizing cannot continue until this worktree matches the PR head. "
+            f"Preserve any local changes, then run `gh pr checkout "
+            f"{pull_request.number} --force` and retry."
         )
 
     dirty = local_git_value(runner, workdir, ["status", "--porcelain"])
@@ -513,13 +518,29 @@ def is_update_branch_conflict(error: CommandError) -> bool:
     )
 
 
-def build_agent_command(*, workdir: Path, prompt: str) -> list[str]:
+def is_update_branch_workflow_scope_error(error: CommandError) -> bool:
+    stderr = error.stderr.casefold()
+    return (
+        error.command[:3] == ["gh", "pr", "update-branch"]
+        and "workflow" in stderr
+        and "scope" in stderr
+        and "oauth" in stderr
+    )
+
+
+def build_agent_command(
+    *,
+    workdir: Path,
+    prompt: str,
+    model: str = DEFAULT_AGENT_MODEL,
+    effort: str = DEFAULT_AGENT_EFFORT,
+) -> list[str]:
     return [
         "codex",
         "--model",
-        DEFAULT_AGENT_MODEL,
+        model,
         "--config",
-        f'model_reasoning_effort="{DEFAULT_AGENT_EFFORT}"',
+        f'model_reasoning_effort="{effort}"',
         "--approve-for-me",
         "--strict-config",
         "--config",
@@ -531,11 +552,24 @@ def build_agent_command(*, workdir: Path, prompt: str) -> list[str]:
 
 
 class AgentLauncher:
-    def __init__(self, *, workdir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        workdir: Path,
+        model: str = DEFAULT_AGENT_MODEL,
+        effort: str = DEFAULT_AGENT_EFFORT,
+    ) -> None:
         self.workdir = workdir
+        self.model = model
+        self.effort = effort
 
     def launch(self, prompt: str, log_path: Path) -> int:
-        command = build_agent_command(workdir=self.workdir, prompt=prompt)
+        command = build_agent_command(
+            workdir=self.workdir,
+            prompt=prompt,
+            model=self.model,
+            effort=self.effort,
+        )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(
             f"Started: {timestamp()}\n"
@@ -797,8 +831,10 @@ class Monitor:
         self.state_store = state_store
         self.agent_launcher = agent_launcher
         self.runner = runner or github.runner
+        self.poll_again_immediately = False
 
     def poll_once(self) -> bool:
+        self.poll_again_immediately = False
         pull_request = self.github.get_pull_request(self.target)
         state = self.state_store.load()
 
@@ -922,6 +958,7 @@ class Monitor:
             log_path,
         )
         returncode = self.agent_launcher.launch(prompt, log_path)
+        self.poll_again_immediately = True
 
         try:
             updated_pull_request = self.github.get_pull_request(self.target)
@@ -983,6 +1020,7 @@ class Monitor:
             log_path,
         )
         returncode = self.agent_launcher.launch(prompt, log_path)
+        self.poll_again_immediately = True
 
         try:
             updated_pull_request = self.github.get_pull_request(self.target)
@@ -1027,7 +1065,29 @@ def sleep_until_next_poll(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def run() -> int:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="fix")
+    parser.add_argument(
+        "--model",
+        default=os.environ.get(AGENT_MODEL_ENV) or DEFAULT_AGENT_MODEL,
+        help=f"Codex model (default: ${AGENT_MODEL_ENV} or {DEFAULT_AGENT_MODEL})",
+    )
+    parser.add_argument(
+        "--effort",
+        default=os.environ.get(AGENT_EFFORT_ENV) or DEFAULT_AGENT_EFFORT,
+        help=(
+            f"Codex reasoning effort "
+            f"(default: ${AGENT_EFFORT_ENV} or {DEFAULT_AGENT_EFFORT})"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def run(
+    *,
+    model: str = DEFAULT_AGENT_MODEL,
+    effort: str = DEFAULT_AGENT_EFFORT,
+) -> int:
     configure_logging()
     workdir = Path.cwd().resolve()
     runner = CommandRunner()
@@ -1041,6 +1101,8 @@ def run() -> int:
     state_store = StateStore(state_path)
     agent_launcher = AgentLauncher(
         workdir=workdir,
+        model=model,
+        effort=effort,
     )
     monitor = Monitor(
         github=github,
@@ -1071,6 +1133,13 @@ def run() -> int:
                     pull_request=initial_pull_request,
                 )
             except CommandError as error:
+                if is_update_branch_workflow_scope_error(error):
+                    raise MonitorError(
+                        "GitHub refused to update the pull request because the "
+                        "`gh` OAuth token lacks the `workflow` scope. Run "
+                        "`gh auth refresh --hostname github.com --scopes workflow` "
+                        "and retry."
+                    ) from error
                 if not is_update_branch_conflict(error):
                     raise
                 returncode = launch_conflict_agent(
@@ -1096,15 +1165,16 @@ def run() -> int:
         while True:
             if monitor.poll_once():
                 return 0
+            if getattr(monitor, "poll_again_immediately", False) is True:
+                LOGGER.info("Polling again immediately after agent exit.")
+                continue
             sleep_until_next_poll(DEFAULT_INTERVAL)
 
 
-def main() -> int:
-    if len(sys.argv) > 1:
-        print("usage: fix", file=sys.stderr)
-        return 2
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_args(argv)
     try:
-        return run()
+        return run(model=args.model, effort=args.effort)
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user.")
         return 0

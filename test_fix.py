@@ -156,6 +156,51 @@ class RunTests(unittest.TestCase):
 
         state_store.assert_called_once_with(Path("/tmp/state.json"))
 
+    def test_run_polls_immediately_after_an_agent_exits(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+
+        class ImmediatePollMonitor:
+            def __init__(self):
+                self.poll_again_immediately = False
+                self.poll_count = 0
+
+            def poll_once(self):
+                self.poll_count += 1
+                if self.poll_count == 1:
+                    self.poll_again_immediately = True
+                    return False
+                return True
+
+        github = mock.Mock()
+        github.get_pull_request.return_value = pull_request
+        monitor = ImmediatePollMonitor()
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+            mock.patch("fix.StateStore"), \
+            mock.patch("fix.AgentLauncher"), \
+            mock.patch("fix.Monitor", return_value=monitor), \
+            mock.patch("fix.synchronize_pull_request", return_value=pull_request), \
+            mock.patch("fix.state_lock", return_value=lock), \
+            mock.patch("fix.sleep_until_next_poll") as sleep:
+            self.assertEqual(fix.run(), 0)
+
+        self.assertEqual(monitor.poll_count, 2)
+        sleep.assert_not_called()
+
     def test_run_launches_conflict_agent_and_retries_synchronization(self):
         initial_pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -213,9 +258,52 @@ class RunTests(unittest.TestCase):
         )
         state_store.assert_called_once_with(Path("/tmp/state.json"))
 
+    def test_run_explains_missing_workflow_scope(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = pull_request
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+        workflow_scope_error = fix.CommandError(
+            ["gh", "pr", "update-branch", "123"],
+            1,
+            "GraphQL: refusing to allow an OAuth App to create or update "
+            "workflow `.github/workflows/ci.yml` without `workflow` scope "
+            "(updatePullRequestBranch)",
+        )
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+            mock.patch("fix.StateStore"), \
+            mock.patch("fix.AgentLauncher"), \
+            mock.patch("fix.Monitor"), \
+            mock.patch(
+                "fix.synchronize_pull_request",
+                side_effect=workflow_scope_error,
+            ), \
+            mock.patch("fix.state_lock", return_value=lock):
+            with self.assertRaises(fix.MonitorError) as context:
+                fix.run()
+
+        self.assertIn(
+            "gh auth refresh --hostname github.com --scopes workflow",
+            str(context.exception),
+        )
+
 
 class AgentCommandTests(unittest.TestCase):
-    def test_command_is_fixed_to_codex_luna_and_max_effort(self):
+    def test_command_defaults_to_codex_luna_and_max_effort(self):
         workdir = Path("/tmp/example-repo")
         command = build_agent_command(workdir=workdir, prompt="Fix the failure.")
         self.assertEqual(
@@ -235,6 +323,59 @@ class AgentCommandTests(unittest.TestCase):
                 "Fix the failure.",
             ],
         )
+
+    def test_command_accepts_model_and_effort(self):
+        workdir = Path("/tmp/example-repo")
+        command = build_agent_command(
+            workdir=workdir,
+            prompt="Fix the failure.",
+            model="openai.gpt-5.6",
+            effort="high",
+        )
+        self.assertIn("--model", command)
+        self.assertIn("openai.gpt-5.6", command)
+        self.assertIn('model_reasoning_effort="high"', command)
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_environment_variables_override_defaults(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                fix.AGENT_MODEL_ENV: "openai.gpt-5.6",
+                fix.AGENT_EFFORT_ENV: "high",
+            },
+            clear=True,
+        ):
+            args = fix.parse_args([])
+
+        self.assertEqual(args.model, "openai.gpt-5.6")
+        self.assertEqual(args.effort, "high")
+
+    def test_flags_override_environment_variables(self):
+        with mock.patch.dict(
+            "os.environ",
+            {
+                fix.AGENT_MODEL_ENV: "environment-model",
+                fix.AGENT_EFFORT_ENV: "low",
+            },
+            clear=True,
+        ):
+            args = fix.parse_args(
+                ["--model", "flag-model", "--effort", "high"]
+            )
+
+        self.assertEqual(args.model, "flag-model")
+        self.assertEqual(args.effort, "high")
+
+    def test_main_passes_model_and_effort_to_run(self):
+        with mock.patch("fix.run", return_value=0) as run:
+            self.assertEqual(
+                fix.main(["--model", "flag-model", "--effort", "high"]),
+                0,
+            )
+
+        run.assert_called_once_with(model="flag-model", effort="high")
 
 
 class AgentLauncherTests(unittest.TestCase):
@@ -610,7 +751,9 @@ class MonitorTests(unittest.TestCase):
             )
             monitor.poll_once()
             self.assertEqual(len(agent.prompts), 1)
+            self.assertTrue(monitor.poll_again_immediately)
             self.assertFalse(monitor.poll_once())
+            self.assertFalse(monitor.poll_again_immediately)
             self.assertEqual(len(agent.prompts), 1)
 
     def test_new_head_allows_a_new_repair_attempt(self):
@@ -844,6 +987,39 @@ class SynchronizePullRequestTests(unittest.TestCase):
         )
         github.get_pull_request.assert_called_once_with("123")
 
+    def test_explains_how_to_align_a_stale_checkout(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="def456",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        runner = SynchronizeRunner("abc123")
+        github = mock.Mock()
+
+        with self.assertRaises(fix.MonitorError) as context:
+            synchronize_pull_request(
+                runner=runner,
+                github=github,
+                workdir=Path("/tmp/example-repo"),
+                pull_request=pull_request,
+            )
+
+        message = str(context.exception)
+        self.assertIn("PR #123 head is def456", message)
+        self.assertIn("gh pr checkout 123 --force", message)
+        self.assertIn("Preserve any local changes", message)
+        self.assertEqual(
+            [command for command, _ in runner.calls],
+            [["git", "rev-parse", "HEAD"]],
+        )
+        github.get_pull_request.assert_not_called()
+
     def test_refuses_to_sync_a_dirty_checkout(self):
         pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -913,6 +1089,24 @@ class SynchronizePullRequestTests(unittest.TestCase):
             ],
         )
         github.get_pull_request.assert_not_called()
+
+
+class UpdateBranchErrorTests(unittest.TestCase):
+    def test_identifies_missing_workflow_scope_error(self):
+        error = fix.CommandError(
+            ["gh", "pr", "update-branch", "123"],
+            1,
+            "refusing to allow an OAuth App to update workflow without workflow scope",
+        )
+        self.assertTrue(fix.is_update_branch_workflow_scope_error(error))
+
+    def test_does_not_classify_merge_conflicts_as_scope_errors(self):
+        error = fix.CommandError(
+            ["gh", "pr", "update-branch", "123"],
+            1,
+            "Cannot update PR branch due to conflicts",
+        )
+        self.assertFalse(fix.is_update_branch_workflow_scope_error(error))
 
 
 if __name__ == "__main__":

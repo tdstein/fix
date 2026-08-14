@@ -20,6 +20,13 @@ request branch.
   `openai.gpt-5.6-luna` model
 - A Unix-like operating system; the monitor uses `fcntl` for process locking
 
+If the pull request changes a GitHub Actions workflow, the `gh` OAuth token
+also needs the `workflow` scope. Add it with:
+
+```bash
+gh auth refresh --hostname github.com --scopes workflow
+```
+
 The Codex agent needs permission to commit and push the pull request branch.
 
 ## Install
@@ -62,11 +69,22 @@ fix
 The current directory and branch determine the pull request. The checkout
 must already be at the current pull request head, with no uncommitted changes.
 
-`fix` polls every five minutes. It stops when the pull request closes or when
-all checks pass without a new review. When checks are waiting or have no
-failures, it also checks pull request reviews. A review session summarizes
-feedback with you, applies small clearly correct fixes, and pauses for your
-judgment on subjective changes.
+Choose the Codex model and reasoning effort with flags:
+
+```bash
+fix --model openai.gpt-5.6-luna --effort max
+```
+
+The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
+precedence over environment variables; without either, `fix` uses
+`openai.gpt-5.6-luna` and `max`.
+
+`fix` polls every five minutes, with one immediate follow-up poll whenever a
+repair or review agent exits. It stops when the pull request closes or when all
+checks pass without a new review. When checks are waiting or have no failures,
+it also checks pull request reviews. A review session summarizes feedback with
+you, applies small clearly correct fixes, and pauses for your judgment on
+subjective changes.
 
 Before monitoring an open pull request, `fix` asks GitHub to update its branch
 from the pull request's configured base branch, then refreshes the local
