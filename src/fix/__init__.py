@@ -69,6 +69,10 @@ class CommandError(MonitorError):
         super().__init__(f"Command failed with exit code {returncode}: {detail}")
 
 
+class ChecksNotReportedError(CommandError):
+    """GitHub has not reported checks for the current pull request head yet."""
+
+
 @dataclasses.dataclass(frozen=True)
 class PullRequest:
     repo: str
@@ -325,6 +329,11 @@ class GitHubClient:
             "name,state,bucket,workflow,link,startedAt,completedAt,description",
         ]
         result = self.runner.run(command, cwd=self.cwd)
+        if (
+            result.returncode != 0
+            and "no checks reported" in result.stderr.casefold()
+        ):
+            raise ChecksNotReportedError(command, result.returncode, result.stderr)
         values = _parse_json_output(result, command, allow_nonzero_json=True)
         if not isinstance(values, list):
             raise MonitorError(f"Unexpected check data from gh: {values}.")
@@ -802,7 +811,12 @@ class Monitor:
             )
             return True
 
-        checks = self.github.get_checks(pull_request)
+        checks_reported = True
+        try:
+            checks = self.github.get_checks(pull_request)
+        except ChecksNotReportedError:
+            checks = []
+            checks_reported = False
         failures = [check for check in checks if check.is_failure]
         LOGGER.info(
             "Polling PR #%s at head %s: %d checks, %d failed.",
@@ -834,7 +848,7 @@ class Monitor:
                     seen_reviews=seen_reviews,
                 )
 
-            if all(check.is_complete for check in checks):
+            if checks_reported and all(check.is_complete for check in checks):
                 self.state_store.save(state)
                 LOGGER.info(
                     "Stopping: CI is complete with %d checks and no new reviews.",
@@ -844,7 +858,12 @@ class Monitor:
 
             self.state_store.save(state)
             LOGGER.info(
-                "CI is still waiting; no new reviews require a review agent."
+                "CI is still waiting; %s.",
+                (
+                    "GitHub has not reported any checks yet"
+                    if not checks_reported
+                    else "no new reviews require a review agent"
+                ),
             )
             return False
 

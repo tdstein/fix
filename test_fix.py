@@ -451,6 +451,36 @@ class GitHubClientTests(unittest.TestCase):
         self.assertEqual(len(reviews), 1)
         self.assertEqual(reviews[0].body, "Looks good.")
 
+    def test_unreported_checks_are_identified_as_transient(self):
+        class Runner:
+            def run(self, command, *, cwd=None):
+                if command[:3] != ["gh", "pr", "checks"]:
+                    raise AssertionError(f"unexpected command: {command}")
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    "",
+                    "no checks reported on the 'fix-ci' branch",
+                )
+
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+
+        with self.assertRaises(fix.ChecksNotReportedError):
+            GitHubClient(
+                cwd=Path("/tmp/example-repo"),
+                runner=Runner(),
+            ).get_checks(pull_request)
+
 
 class FakeRunner:
     def __init__(self, head_sha):
@@ -744,6 +774,31 @@ class MonitorTests(unittest.TestCase):
             )
 
             self.assertTrue(monitor.poll_once())
+            self.assertEqual(agent.prompts, [])
+
+    def test_unreported_checks_wait_without_stopping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [], [])
+            github.get_checks = mock.Mock(
+                side_effect=fix.ChecksNotReportedError(
+                    ["gh", "pr", "checks", "123"],
+                    1,
+                    "no checks reported on the 'fix-ci' branch",
+                )
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            self.assertFalse(monitor.poll_once())
+            self.assertEqual(github.review_calls, 1)
             self.assertEqual(agent.prompts, [])
 
 
