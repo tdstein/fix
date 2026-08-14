@@ -2,13 +2,17 @@ SHELL := /bin/sh
 
 PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 INSTALL_DIR := $(HOME)/.local/bin
-FIX_PATH := $(INSTALL_DIR)/fix
+UV ?= uv
+PYTHON ?= $(UV) run python
 
-.PHONY: install uninstall
+.PHONY: install uninstall test
 
 install:
-	mkdir -p "$(INSTALL_DIR)"
-	install -m 755 "$(PROJECT_DIR)fix.py" "$(FIX_PATH)"
+	$(UV) tool install --force "$(PROJECT_DIR)"
 
 uninstall:
-	rm -f "$(FIX_PATH)" "$(INSTALL_DIR)/fix.py"
+	-$(UV) tool uninstall fix
+	rm -f "$(INSTALL_DIR)/fix" "$(INSTALL_DIR)/fix.py"
+
+test:
+	$(PYTHON) -m unittest discover -v
