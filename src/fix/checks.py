@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from .constants import LOGGER
 from .errors import ChecksNotReportedError
 from .github import GitHubClient
-from .models import Check, CheckSnapshot, PullRequest, StartupStatus
+from .models import Check, CheckSnapshot, PullRequest, Review, StartupStatus
+
+
+STATUS_GLYPHS = {
+    "pass": "✓",
+    "fail": "✗",
+    "wait": "…",
+}
 
 
 def summarize_checks(
@@ -25,12 +32,16 @@ def summarize_checks(
         state = "pass"
     else:
         state = "wait"
-    details = (
-        f"{len(checks)} total · "
-        f"{passed_checks} passed · "
-        f"{failed_checks} failed · "
-        f"{pending_checks} pending"
-    )
+    if failed_checks:
+        details = f"{passed_checks}/{len(checks)} passed"
+        details += f" · {failed_checks} failed"
+        if pending_checks:
+            details += f" · {pending_checks} pending"
+    elif pending_checks:
+        details = f"{len(checks) - pending_checks}/{len(checks)} complete"
+        details += f" · {pending_checks} pending"
+    else:
+        details = f"{passed_checks}/{len(checks)} passed"
     return state, details
 
 
@@ -43,7 +54,41 @@ def format_ci_check(
         checks,
         checks_reported=checks_reported,
     )
-    return f"CI ......... {state:<4} ({details})"
+    return f"{STATUS_GLYPHS[state]} CI          {details}"
+
+
+def format_mergeability(
+    pull_request: PullRequest,
+) -> str:
+    base_branch = pull_request.base_branch or "(unknown base)"
+    if pull_request.has_merge_conflicts:
+        state = "fail"
+        details = f"conflicts vs {base_branch}"
+    elif not pull_request.mergeability_is_known:
+        state = "wait"
+        details = f"still calculating vs {base_branch}"
+    else:
+        state = "pass"
+        details = f"no conflicts vs {base_branch}"
+    return f"{STATUS_GLYPHS[state]} Mergeable   {details}"
+
+
+def find_new_reviews(
+    *,
+    reviews: Sequence[Review],
+    pull_request: PullRequest,
+    seen_reviews: Mapping[str, Any],
+) -> list[tuple[str, Review]]:
+    other_reviews = [
+        review
+        for review in reviews
+        if review.is_submitted and review.is_from_other(pull_request)
+    ]
+    return [
+        (review.review_key(), review)
+        for review in other_reviews
+        if review.review_key() not in seen_reviews
+    ]
 
 
 def inspect_startup(
@@ -51,7 +96,7 @@ def inspect_startup(
     github: GitHubClient,
     pull_request: PullRequest,
 ) -> StartupStatus:
-    LOGGER.info("Startup checks (2)")
+    LOGGER.info("Startup checks")
     try:
         checks = tuple(github.get_checks(pull_request))
     except ChecksNotReportedError:
@@ -78,26 +123,8 @@ def inspect_startup(
         ),
     )
 
-    LOGGER.info(
-        "  [1/2] %s",
-        format_ci_check(checks, checks_reported=checks_reported),
-    )
-
-    base_branch = pull_request.base_branch or "(unknown base)"
-    if startup_status.has_merge_conflicts:
-        merge_state = "fail"
-        merge_details = f"conflicts vs {base_branch}"
-    elif not startup_status.mergeability_is_known:
-        merge_state = "wait"
-        merge_details = f"still calculating vs {base_branch}"
-    else:
-        merge_state = "pass"
-        merge_details = f"no conflicts vs {base_branch}"
-    LOGGER.info(
-        "  [2/2] Mergeable .. %-4s (%s)",
-        merge_state,
-        merge_details,
-    )
+    LOGGER.info("%s", format_ci_check(checks, checks_reported=checks_reported))
+    LOGGER.info("%s", format_mergeability(pull_request))
     return startup_status
 
 
@@ -120,14 +147,14 @@ def log_startup_decision(status: StartupStatus) -> None:
         if status.has_merge_conflicts:
             reasons.append("merge conflicts")
         LOGGER.info(
-            "Startup requires action -> synchronizing (%s).",
+            "➜ synchronizing · %s",
             " and ".join(reasons),
         )
     elif status.ci_is_green and status.mergeability_is_known:
         LOGGER.info(
-            "Monitoring...",
+            "⟳ monitoring · waiting for review changes",
         )
     else:
         LOGGER.info(
-            "Startup pending -> entering monitor while GitHub reports back.",
+            "… waiting for CI or mergeability",
         )

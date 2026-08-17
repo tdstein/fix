@@ -75,6 +75,9 @@ Choose the Codex model and reasoning effort with flags:
 fix --model openai.gpt-5.6-luna --effort max
 ```
 
+Use `--verbose` to show the full monitor configuration panel instead of the
+compact one-line header.
+
 The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
 precedence over environment variables; without either, `fix` uses
 `openai.gpt-5.6-luna` and `max`.

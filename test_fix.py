@@ -61,6 +61,26 @@ class LoggingTests(unittest.TestCase):
         self.assertIn("fix.pass", styles)
         self.assertNotIn("fix.fail", styles)
 
+    def test_agent_glyph_has_agent_style(self):
+        rendered = fix.FixHighlighter()(Text("➜ Agent review"))
+
+        self.assertIn("fix.agent", {span.style for span in rendered.spans})
+
+    def test_idle_status_includes_countdown_and_last_state(self):
+        with mock.patch("fix.cli.CONSOLE", mock.Mock(is_terminal=False)), \
+            mock.patch("fix.cli.time.sleep") as sleep:
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                fix.sleep_until_next_poll(
+                    192,
+                    last_status="all green",
+                )
+
+        self.assertIn(
+            "⟳ next poll in 3m 12s (last: startup, all green)",
+            "\n".join(logs.output),
+        )
+        sleep.assert_called_once_with(192)
+
 
 class UiTests(unittest.TestCase):
     def test_monitor_header_contains_pull_request_context(self):
@@ -85,6 +105,7 @@ class UiTests(unittest.TestCase):
                 effort="max",
                 interval_seconds=300,
                 timeout_seconds=7200,
+                verbose=True,
             )
         )
 
@@ -94,6 +115,33 @@ class UiTests(unittest.TestCase):
         self.assertIn("[bracket] Improve CI feedback", output)
         self.assertIn("fix-ci -> main", output)
         self.assertIn("poll every 5m; agent timeout 2h", output)
+
+    def test_compact_monitor_header_is_one_line(self):
+        pull_request = fix.PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="https://github.com/example-org/example-repo/pull/123",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        header = fix.build_monitor_header(
+            pull_request,
+            model="openai.gpt-5.6-luna",
+            effort="max",
+            interval_seconds=300,
+            timeout_seconds=7200,
+        )
+
+        self.assertEqual(
+            header.plain,
+            "fix monitor · example-org/example-repo#123 · "
+            "gpt-5.6-luna · poll 5m · timeout 2h",
+        )
+        self.assertTrue(any(span.style.startswith("link ") for span in header.spans))
 
     def test_monitor_header_skips_non_interactive_output(self):
         pull_request = fix.PullRequest(
@@ -289,9 +337,8 @@ class RunTests(unittest.TestCase):
         github = mock.Mock()
         github.get_pull_request.return_value = pull_request
         github.get_checks.return_value = [passed_check]
+        github.get_reviews.return_value = []
         monitor = mock.Mock()
-        monitor.poll_once.return_value = True
-        monitor.stop_reason = "CI is complete with 1 checks and no new reviews."
         lock = mock.MagicMock()
         lock.__enter__.return_value = lock
 
@@ -301,50 +348,82 @@ class RunTests(unittest.TestCase):
                 mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
                 mock.patch("fix.StateStore"), \
                 mock.patch("fix.AgentLauncher"), \
-                mock.patch("fix.Monitor", return_value=monitor), \
+                mock.patch("fix.Monitor", return_value=monitor) as monitor_factory, \
                 mock.patch("fix.synchronize_pull_request") as synchronize, \
                 mock.patch("fix.state_lock", return_value=lock):
                 self.assertEqual(fix.run(), 0)
 
         synchronize.assert_not_called()
+        monitor_factory.assert_not_called()
         output = "\n".join(logs.output)
+        self.assertIn("Watching example-org/example-repo#123 @ abc123.", output)
+        self.assertIn("⟳ poll every 5m · agent timeout 2h", output)
+        self.assertIn("Startup checks", output)
+        self.assertIn("✓ CI          1/1 passed", output)
+        self.assertIn("✓ Mergeable   no conflicts vs main", output)
         self.assertIn(
-            "Watching example-org/example-repo#123 @ abc123 (agents act only when needed).",
+            "✓ Done in 0s — exit condition met "
+            "(CI green, no conflicts, no new reviews) · "
+            "0 polls · 0 agents · PR #123 (open)",
             output,
         )
-        self.assertIn(
-            "Exit when: all checks complete and no new reviews need attention.",
-            output,
+
+    def test_run_enters_monitor_for_green_pr_with_new_review(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            author_login="contributor",
+            mergeable="MERGEABLE",
+            merge_state_status="CLEAN",
         )
-        self.assertIn("Poll interval 5m; agent timeout 2h.", output)
-        self.assertIn("Startup checks (2)", output)
-        self.assertIn(
-            "[1/2] CI ......... pass "
-            "(1 total · 1 passed · 0 failed · 0 pending)",
-            output,
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="",
+            completed_at="",
+            description="",
         )
-        self.assertIn(
-            "[2/2] Mergeable .. pass (no conflicts vs main)",
-            output,
+        review = Review(
+            id="review-1",
+            author_login="maintainer",
+            state="CHANGES_REQUESTED",
+            body="Please handle this edge case.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha="abc123",
         )
-        self.assertIn(
-            "Monitoring...",
-            output,
-        )
-        self.assertIn(
-            "[1/4] Stopping: CI is complete with 1 checks and no new reviews.",
-            output,
-        )
-        self.assertIn(
-            "[2/4] Exit condition met on the initial check; "
-            "no interval polling needed.",
-            output,
-        )
-        self.assertIn(
-            "[4/4] Ready: checks are green, conflicts are clear, and "
-            "no new reviews need attention.",
-            output,
-        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = [passed_check]
+        github.get_reviews.return_value = [review]
+        monitor = mock.Mock()
+        monitor.poll_once.return_value = True
+        monitor.stop_reason = "CI is complete with 1 check and no new reviews."
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+            mock.patch("fix.StateStore"), \
+            mock.patch("fix.AgentLauncher"), \
+            mock.patch("fix.Monitor", return_value=monitor) as monitor_factory, \
+            mock.patch("fix.synchronize_pull_request") as synchronize, \
+            mock.patch("fix.state_lock", return_value=lock):
+            self.assertEqual(fix.run(), 0)
+
+        synchronize.assert_not_called()
+        monitor_factory.assert_called_once()
+        monitor.poll_once.assert_called_once()
 
     def test_run_polls_immediately_after_an_agent_exits(self):
         pull_request = PullRequest(
@@ -620,6 +699,19 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(args.model, "flag-model")
         self.assertEqual(args.effort, "high")
+
+    def test_verbose_flag_is_parsed(self):
+        self.assertTrue(fix.parse_args(["--verbose"]).verbose)
+
+    def test_main_passes_verbose_to_run(self):
+        with mock.patch("fix.run", return_value=0) as run:
+            self.assertEqual(fix.main(["--verbose"]), 0)
+
+        run.assert_called_once_with(
+            model=fix.DEFAULT_AGENT_MODEL,
+            effort=fix.DEFAULT_AGENT_EFFORT,
+            verbose=True,
+        )
 
     def test_main_passes_model_and_effort_to_run(self):
         with mock.patch("fix.run", return_value=0) as run:
@@ -1084,8 +1176,7 @@ class MonitorTests(unittest.TestCase):
                 self.assertTrue(monitor.poll_once())
 
         self.assertIn(
-            "Checking PR #123 at head abc123: CI ......... pass "
-            "(1 total · 1 passed · 0 failed · 0 pending).",
+            "✓ CI          1/1 passed · #123 @ abc123",
             "\n".join(logs.output),
         )
 
@@ -1123,7 +1214,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(github.check_calls, 0)
         self.assertEqual(
             monitor.stop_reason,
-            "CI is complete with 1 checks and no new reviews.",
+            "CI is complete with 1 check and no new reviews.",
         )
 
     def test_conflicts_detected_during_monitor_trigger_synchronization(self):
@@ -1244,10 +1335,16 @@ class MonitorTests(unittest.TestCase):
                 runner=github.runner,
             )
 
-            self.assertFalse(monitor.poll_once())
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                self.assertFalse(monitor.poll_once())
             self.assertEqual(len(agent.prompts), 1)
             self.assertIn("Please handle this edge case.", agent.prompts[0][0])
             self.assertEqual(github.review_calls, 1)
+
+        output = "\n".join(logs.output)
+        self.assertIn("━", output)
+        self.assertIn("➜ Agent review", output)
+        self.assertIn("review @maintainer: Please handle this edge case.", output)
 
     def test_waiting_ci_also_checks_for_reviews(self):
         review = Review(

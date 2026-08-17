@@ -24,6 +24,7 @@ from .agents import (
 )
 from .checks import (
     format_ci_check,
+    format_mergeability,
     inspect_startup,
     log_startup_decision,
     should_synchronize_pull_request,
@@ -124,12 +125,14 @@ def run(
     *,
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
+    verbose: bool = False,
 ) -> int:
     """Run the monitor using the package-level compatibility hooks."""
 
     return _run(
         model=model,
         effort=effort,
+        verbose=verbose,
         dependencies=RunDependencies(
             configure_logging=configure_logging,
             command_runner_factory=CommandRunner,
@@ -153,7 +156,13 @@ def run(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        return run(model=args.model, effort=args.effort)
+        run_kwargs = {
+            "model": args.model,
+            "effort": args.effort,
+        }
+        if args.verbose:
+            run_kwargs["verbose"] = True
+        return run(**run_kwargs)
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user.")
         return 0
@@ -204,6 +213,7 @@ __all__ = [
     "configure_logging",
     "default_state_path",
     "format_ci_check",
+    "format_mergeability",
     "inspect_startup",
     "is_update_branch_conflict",
     "is_update_branch_workflow_scope_error",

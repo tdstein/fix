@@ -5,7 +5,11 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import time
 from typing import Callable, Sequence
+
+from rich.live import Live
+from rich.text import Text
 
 from .constants import (
     DEFAULT_AGENT_EFFORT,
@@ -22,6 +26,7 @@ from .repository import (
     synchronize_pull_request,
 )
 from .state import timestamp
+from .ui import CONSOLE
 
 
 def build_agent_command(
@@ -58,6 +63,10 @@ class AgentLauncher:
         self.workdir = workdir
         self.model = model
         self.effort = effort
+        self.launch_count = 0
+        self.last_pid = None
+        self.last_elapsed_seconds = None
+        self._last_timed_out = False
 
     def launch(self, prompt: str, log_path: Path) -> int:
         command = build_agent_command(
@@ -85,19 +94,56 @@ class AgentLauncher:
                 "install Codex and ensure it is on PATH."
             ) from error
 
+        self.launch_count += 1
+        self.last_pid = process.pid
+        self._last_timed_out = False
+        LOGGER.info("➜ pid %d · agent session started", process.pid)
+        started_at = time.monotonic()
         try:
-            returncode = process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
+            returncode = self._wait_for_process(process)
         except subprocess.TimeoutExpired:
             self._kill_process_group(process)
             returncode = 124
-            with log_path.open("a") as log_file:
-                log_file.write(f"Timed out after {DEFAULT_AGENT_TIMEOUT:g} seconds.\n")
+            self._last_timed_out = True
         except KeyboardInterrupt:
             self._kill_process_group(process)
             raise
+        self.last_elapsed_seconds = time.monotonic() - started_at
+        if self._last_timed_out:
+            with log_path.open("a") as log_file:
+                log_file.write(f"Timed out after {DEFAULT_AGENT_TIMEOUT:g} seconds.\n")
         with log_path.open("a") as log_file:
             log_file.write(f"Finished: {timestamp()}\nExit code: {returncode}\n")
         return returncode
+
+    def _wait_for_process(self, process: subprocess.Popen) -> int:
+        if not CONSOLE.is_terminal:
+            return process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
+
+        deadline = time.monotonic() + DEFAULT_AGENT_TIMEOUT
+        with Live(
+            Text(f"➜ agent pid {process.pid} · running · 0s"),
+            console=CONSOLE,
+            refresh_per_second=2,
+            transient=True,
+        ) as live:
+            while True:
+                remaining = max(0, deadline - time.monotonic())
+                elapsed = DEFAULT_AGENT_TIMEOUT - remaining
+                live.update(
+                    Text(
+                        f"➜ agent pid {process.pid} · running · "
+                        f"{elapsed:.0f}s"
+                    )
+                )
+                if remaining <= 0:
+                    self._kill_process_group(process)
+                    self._last_timed_out = True
+                    return 124
+                try:
+                    return process.wait(timeout=min(1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
 
     @staticmethod
     def _kill_process_group(process: subprocess.Popen) -> None:
@@ -172,8 +218,12 @@ def launch_conflict_agent(
         f"-{pull_request.head_sha[:12]}-conflict.log"
     )
     prompt = build_conflict_prompt(pull_request, workdir=workdir)
+    LOGGER.info("━" * 72)
     LOGGER.info(
-        "Launching interactive Codex to resolve merge conflicts. Session log: %s",
+        "➜ Agent conflict · resolve merge conflicts",
+    )
+    LOGGER.info(
+        "  session: %s",
         log_path,
     )
     return agent_launcher.launch(prompt, log_path)
@@ -214,10 +264,10 @@ def synchronize_with_conflict_resolution(
             agent_launcher=agent_launcher,
         )
         if returncode == 0:
-            LOGGER.info("The conflict-resolution agent completed successfully.")
+            LOGGER.info("✓ Agent conflict completed")
         else:
             LOGGER.error(
-                "The conflict-resolution agent failed with exit code %d.",
+                "Agent conflict failed with exit code %d",
                 returncode,
             )
         updated_pull_request = github.get_pull_request(str(pull_request.number))

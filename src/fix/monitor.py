@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import textwrap
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
@@ -8,7 +10,7 @@ from .agents import (
     build_review_prompt,
     synchronize_with_conflict_resolution,
 )
-from .checks import format_ci_check
+from .checks import find_new_reviews, format_ci_check
 from .constants import (
     DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD,
     LOGGER,
@@ -44,17 +46,28 @@ class Monitor:
         self.runner = runner or github.runner
         self.poll_again_immediately = False
         self.poll_count = 0
+        self.agents_launched = 0
+        self.last_poll_at: Optional[float] = None
+        self.last_status = "starting"
+        self.last_pull_request: Optional[PullRequest] = None
         self.stop_reason: Optional[str] = None
+        self._last_check_line: Optional[str] = None
         self._initial_check_snapshot = initial_check_snapshot
         self._synchronize_with_conflict_resolution = (
             synchronize_with_conflict_resolution_fn
         )
         self._validate_agent_checkout = validate_agent_checkout_fn
 
+    def _set_status(self, status: str, message: Optional[str] = None) -> None:
+        changed = status != self.last_status
+        self.last_status = status
+        if changed and message:
+            LOGGER.info("%s", message)
+
     def _synchronize_conflicts(self, pull_request: PullRequest) -> bool:
+        self._set_status("merge conflicts")
         LOGGER.info(
-            "Monitoring found merge conflicts for PR #%d; synchronizing with "
-            "base branch `%s`.",
+            "➜ conflict sync · PR #%d · base `%s`",
             pull_request.number,
             pull_request.base_branch or "(unknown)",
         )
@@ -68,16 +81,41 @@ class Monitor:
         )
         if synchronized_pull_request.head_sha != pull_request.head_sha:
             LOGGER.info(
-                "Conflict synchronization advanced PR #%d to %s. "
-                "Waiting for GitHub to recognize the new head and start CI.",
+                "… conflict sync advanced PR #%d to %s; waiting for CI",
                 pull_request.number,
                 synchronized_pull_request.head_sha[:12],
             )
         else:
             LOGGER.info(
-                "Conflict synchronization completed without changing the PR head."
+                "… conflict sync completed without changing the PR head"
             )
         return False
+
+    def _log_agent_launch(
+        self,
+        *,
+        agent_kind: str,
+        details: str,
+        log_path: Path,
+    ) -> None:
+        LOGGER.info("━" * 72)
+        LOGGER.info("➜ Agent %s · %s", agent_kind, details)
+        LOGGER.info("  session: %s", log_path)
+
+    def _log_agent_result(self, *, agent_kind: str, returncode: int) -> None:
+        elapsed = getattr(self.agent_launcher, "last_elapsed_seconds", None)
+        elapsed_suffix = (
+            f" · {elapsed:.0f}s" if isinstance(elapsed, (int, float)) else ""
+        )
+        if returncode == 0:
+            LOGGER.info("✓ Agent %s completed%s", agent_kind, elapsed_suffix)
+        else:
+            LOGGER.error(
+                "Agent %s failed with exit code %d%s",
+                agent_kind,
+                returncode,
+                elapsed_suffix,
+            )
 
     def _verify_agent_result(
         self,
@@ -98,14 +136,16 @@ class Monitor:
             )
             return None
 
+        self.last_pull_request = updated_pull_request
         if updated_pull_request.head_sha == pull_request.head_sha:
             LOGGER.info(
-                "The %s agent finished without a visible remote head change.",
+                "✓ %s agent · remote head unchanged",
                 agent_kind,
             )
         else:
             LOGGER.info(
-                "The PR head advanced from %s to %s.",
+                "✓ %s agent · head advanced %s -> %s",
+                agent_kind,
                 pull_request.head_sha[:12],
                 updated_pull_request.head_sha[:12],
             )
@@ -132,7 +172,9 @@ class Monitor:
         self.poll_again_immediately = False
         self.stop_reason = None
         self.poll_count += 1
+        self.last_poll_at = time.time()
         pull_request = self.github.get_pull_request(self.target)
+        self.last_pull_request = pull_request
         state = self.state_store.load()
 
         if not pull_request.is_open:
@@ -141,6 +183,7 @@ class Monitor:
                 f"PR #{pull_request.number} is "
                 f"{'merged' if pull_request.merged_at else pull_request.state.lower()}."
             )
+            self._set_status("closed")
             return True
 
         if pull_request.has_merge_conflicts:
@@ -166,30 +209,31 @@ class Monitor:
                 checks_reported = False
             log_check_status = True
         failures = [check for check in checks if check.is_failure]
+        check_line = format_ci_check(
+            checks,
+            checks_reported=checks_reported,
+        )
         if log_check_status:
-            LOGGER.info(
-                "%s PR #%s at head %s: %s.",
-                "Checking" if self.poll_count == 1 else "Polling",
-                pull_request.number,
-                pull_request.head_sha[:12],
-                format_ci_check(checks, checks_reported=checks_reported),
-            )
+            if check_line != self._last_check_line:
+                LOGGER.info(
+                    "%s · #%d @ %s",
+                    check_line,
+                    pull_request.number,
+                    pull_request.head_sha[:8],
+                )
+        self._last_check_line = check_line
 
         if not failures:
             reviews = self.github.get_reviews(pull_request)
-            other_reviews = [
-                review
-                for review in reviews
-                if review.is_submitted and review.is_from_other(pull_request)
-            ]
             seen_reviews = state.setdefault("seen_reviews", {})
-            new_reviews = [
-                (review.review_key(), review)
-                for review in other_reviews
-                if review.review_key() not in seen_reviews
-            ]
+            new_reviews = find_new_reviews(
+                reviews=reviews,
+                pull_request=pull_request,
+                seen_reviews=seen_reviews,
+            )
 
             if new_reviews:
+                self._set_status("review feedback")
                 return self._launch_review_agent(
                     pull_request=pull_request,
                     new_reviews=new_reviews,
@@ -200,20 +244,23 @@ class Monitor:
             if checks_reported and all(check.is_complete for check in checks):
                 self.state_store.save(state)
                 self.stop_reason = (
-                    f"CI is complete with {len(checks)} checks "
+                    f"CI is complete with {len(checks)} "
+                    f"{'check' if len(checks) == 1 else 'checks'} "
                     "and no new reviews."
                 )
+                self._set_status("all green")
                 return True
 
             self.state_store.save(state)
-            LOGGER.info(
-                "CI is still waiting; %s.",
-                (
-                    "GitHub has not reported any checks yet"
-                    if not checks_reported
-                    else "no new reviews require a review agent"
-                ),
+            waiting_status = (
+                "CI pending" if not checks_reported or not checks else "no new reviews"
             )
+            waiting_message = (
+                "… CI pending · checks not reported yet"
+                if not checks_reported
+                else "… CI pending · waiting for checks"
+            )
+            self._set_status(waiting_status, waiting_message)
             return False
 
         seen_failures = state.setdefault("seen_failures", {})
@@ -225,10 +272,13 @@ class Monitor:
 
         if not new_failures:
             self.state_store.save(state)
-            LOGGER.info(
-                "No new failed checks require a repair agent; %d failure%s already handled.",
-                len(failures),
-                "" if len(failures) == 1 else "s",
+            self._set_status(
+                "failures already handled",
+                (
+                    "… failed checks already handled · "
+                    f"{len(failures)} failure"
+                    f"{'' if len(failures) == 1 else 's'}"
+                ),
             )
             return False
 
@@ -239,6 +289,7 @@ class Monitor:
             and attempts >= DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD
         ):
             self.state_store.save(state)
+            self._set_status("repair limit reached")
             LOGGER.warning(
                 "Skipping repair for head %s: reached %d attempts.",
                 pull_request.head_sha[:12],
@@ -264,11 +315,15 @@ class Monitor:
             f"-{pull_request.head_sha[:12]}-attempt-{attempts + 1}.log"
         )
         prompt = build_agent_prompt(pull_request, new_failures, workdir=self.workdir)
-        LOGGER.info(
-            "Launching interactive Codex for %d new failure%s. Session log: %s",
-            len(new_failures),
-            "" if len(new_failures) == 1 else "s",
-            log_path,
+        self.agents_launched += 1
+        failure_names = ", ".join(check.name for _, check in new_failures)
+        self._log_agent_launch(
+            agent_kind="repair",
+            details=(
+                f"{len(new_failures)} new failure"
+                f"{'' if len(new_failures) == 1 else 's'} · {failure_names}"
+            ),
+            log_path=log_path,
         )
         returncode = self.agent_launcher.launch(prompt, log_path)
         self.poll_again_immediately = True
@@ -288,10 +343,7 @@ class Monitor:
             seen_failures[key] = {"seen_at": timestamp()}
         self._prune_seen_items(seen_failures)
         self.state_store.save(state)
-        if returncode == 0:
-            LOGGER.info("The repair agent completed successfully.")
-        else:
-            LOGGER.error("The repair agent failed with exit code %d.", returncode)
+        self._log_agent_result(agent_kind="repair", returncode=returncode)
         return False
 
     def _launch_review_agent(
@@ -320,12 +372,26 @@ class Monitor:
             f"-{pull_request.head_sha[:12]}-review-{len(seen_reviews) + 1}.log"
         )
         prompt = build_review_prompt(pull_request, new_reviews, workdir=self.workdir)
-        LOGGER.info(
-            "Launching interactive Codex for %d new review%s. Session log: %s",
-            len(new_reviews),
-            "" if len(new_reviews) == 1 else "s",
-            log_path,
+        self.agents_launched += 1
+        self._log_agent_launch(
+            agent_kind="review",
+            details=(
+                f"{len(new_reviews)} new review"
+                f"{'' if len(new_reviews) == 1 else 's'}"
+            ),
+            log_path=log_path,
         )
+        for _, review in new_reviews:
+            body = textwrap.shorten(
+                " ".join(review.body.split()) or "(no comment body)",
+                width=180,
+                placeholder="...",
+            )
+            LOGGER.info(
+                "  review @%s: %s",
+                review.author_login or "unknown",
+                body,
+            )
         returncode = self.agent_launcher.launch(prompt, log_path)
         self.poll_again_immediately = True
 
@@ -343,10 +409,7 @@ class Monitor:
             seen_reviews[key] = {"seen_at": timestamp()}
         self._prune_seen_items(seen_reviews)
         self.state_store.save(state)
-        if returncode == 0:
-            LOGGER.info("The review agent completed successfully.")
-        else:
-            LOGGER.error("The review agent failed with exit code %d.", returncode)
+        self._log_agent_result(agent_kind="review", returncode=returncode)
         return False
 
     @staticmethod
