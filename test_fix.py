@@ -110,7 +110,7 @@ class UiTests(unittest.TestCase):
         )
 
         output = stream.getvalue()
-        self.assertIn("fix monitor", output)
+        self.assertIn("fix", output)
         self.assertIn("example-org/example-repo#123", output)
         self.assertIn("[bracket] Improve CI feedback", output)
         self.assertIn("fix-ci -> main", output)
@@ -138,7 +138,7 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(
             header.plain,
-            "fix monitor · example-org/example-repo#123 · "
+            "fix · example-org/example-repo#123 · "
             "gpt-5.6-luna · poll 5m · timeout 2h",
         )
         self.assertTrue(any(span.style.startswith("link ") for span in header.spans))

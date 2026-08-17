@@ -91,7 +91,7 @@ def build_monitor_header(
         pull_request_label.stylize(f"link {pull_request.url}")
 
     if not verbose:
-        header = Text("fix monitor", style="bold cyan")
+        header = Text("fix", style="bold cyan")
         for value in (
             pull_request_label,
             _value(_short_model(model)),
@@ -133,7 +133,7 @@ def build_monitor_header(
     )
     return Panel(
         table,
-        title=Text("fix monitor", style="bold cyan"),
+        title=Text("fix", style="bold cyan"),
         border_style="cyan",
         padding=(0, 1),
         expand=False,
