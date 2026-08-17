@@ -1,4 +1,5 @@
 import dataclasses
+from io import StringIO
 import json
 from pathlib import Path
 import signal
@@ -8,6 +9,7 @@ import unittest
 from unittest import mock
 
 import fix
+from rich.console import Console
 from fix import (
     AgentLauncher,
     Check,
@@ -23,6 +25,92 @@ from fix import (
     default_state_path,
     synchronize_pull_request,
 )
+
+
+class LoggingTests(unittest.TestCase):
+    def test_configure_logging_uses_rich_handler(self):
+        with mock.patch("fix.logging.basicConfig") as basic_config:
+            fix.configure_logging()
+
+        configuration = basic_config.call_args.kwargs
+        self.assertEqual(configuration["level"], fix.logging.INFO)
+        self.assertEqual(configuration["format"], "%(message)s")
+        self.assertEqual(configuration["datefmt"], "[%X]")
+        self.assertTrue(configuration["force"])
+        self.assertEqual(len(configuration["handlers"]), 1)
+        self.assertIsInstance(configuration["handlers"][0], fix.RichHandler)
+        self.assertFalse(configuration["handlers"][0]._log_render.show_path)
+        self.assertTrue(configuration["handlers"][0]._log_render.show_level)
+        self.assertIsInstance(
+            configuration["handlers"][0].highlighter,
+            fix.FixHighlighter,
+        )
+        self.assertTrue(configuration["handlers"][0].rich_tracebacks)
+        self.assertEqual(
+            configuration["handlers"][0]._log_render.time_format,
+            "[%X]",
+        )
+
+
+class UiTests(unittest.TestCase):
+    def test_monitor_header_contains_pull_request_context(self):
+        pull_request = fix.PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="[bracket] Improve CI feedback",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123def456",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        stream = StringIO()
+        console = Console(file=stream, force_terminal=False, width=100)
+
+        console.print(
+            fix.build_monitor_header(
+                pull_request,
+                model="openai.gpt-5.6-luna",
+                effort="max",
+                interval_seconds=300,
+                timeout_seconds=7200,
+            )
+        )
+
+        output = stream.getvalue()
+        self.assertIn("fix monitor", output)
+        self.assertIn("example-org/example-repo#123", output)
+        self.assertIn("[bracket] Improve CI feedback", output)
+        self.assertIn("fix-ci -> main", output)
+        self.assertIn("poll every 5m; agent timeout 2h", output)
+
+    def test_monitor_header_skips_non_interactive_output(self):
+        pull_request = fix.PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        stream = StringIO()
+        console = Console(file=stream, force_terminal=False)
+
+        rendered = fix.render_monitor_header(
+            pull_request,
+            model="model",
+            effort="max",
+            interval_seconds=300,
+            timeout_seconds=7200,
+            console=console,
+        )
+
+        self.assertFalse(rendered)
+        self.assertEqual(stream.getvalue(), "")
 
 
 class CheckTests(unittest.TestCase):
@@ -525,6 +613,13 @@ class ConfigurationTests(unittest.TestCase):
             )
 
         run.assert_called_once_with(model="flag-model", effort="high")
+
+    def test_main_reports_unexpected_errors(self):
+        with mock.patch("fix.run", side_effect=RuntimeError("boom")):
+            with self.assertLogs(fix.LOGGER, level="ERROR") as logs:
+                self.assertEqual(fix.main([]), 1)
+
+        self.assertIn("Unexpected error while monitoring.", logs.output[0])
 
 
 class AgentLauncherTests(unittest.TestCase):

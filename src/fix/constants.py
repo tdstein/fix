@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+import logging
+
+
+LOGGER = logging.getLogger("fix")
+STATE_VERSION = 1
+DEFAULT_INTERVAL = 5 * 60
+DEFAULT_AGENT_TIMEOUT = 2 * 60 * 60
+DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD = 10
+DEFAULT_AGENT_MODEL = "openai.gpt-5.6-luna"
+DEFAULT_AGENT_EFFORT = "max"
+AGENT_MODEL_ENV = "FIX_MODEL"
+AGENT_EFFORT_ENV = "FIX_EFFORT"
+FAILURE_KEY_VERSION = 2
+REVIEW_KEY_VERSION = 1
+FAILURE_BUCKETS = frozenset(("fail", "cancel"))
+FAILURE_STATES = frozenset(("FAILURE", "CANCELLED", "TIMED_OUT", "ERROR"))
+PASS_BUCKETS = frozenset(("pass", "skipping"))
+PASS_STATES = frozenset(("SUCCESS", "SKIPPED", "NEUTRAL"))
+SUBMITTED_REVIEW_STATES = frozenset(
+    ("APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED")
+)

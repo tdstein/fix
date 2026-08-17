@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [{ name = "Taylor Steinberg" }]
-dependencies = []
+dependencies = ["rich>=13.0.0"]
 
 [project.scripts]
 fix = "fix:main"

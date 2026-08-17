@@ -88,6 +88,10 @@ no failures, it also checks pull request reviews. A review session summarizes
 feedback with you, applies small clearly correct fixes, and pauses for your
 judgment on subjective changes.
 
+In an interactive terminal, `fix` shows a compact monitor summary and
+color-coded check and agent statuses. Piped output remains plain and
+log-friendly.
+
 Before monitoring an open pull request, `fix` checks its CI status and
 mergeability. It updates the branch from the pull request's configured base
 branch only when CI has a failure or GitHub reports merge conflicts. If GitHub
@@ -113,7 +117,7 @@ not be able to access.
 
 ## Development
 
-This project has no third-party Python dependencies. Run the test suite with:
+The project dependencies are resolved by `uv`. Run the test suite with:
 
 ```bash
 make test
