@@ -14,10 +14,12 @@ import logging
 import os
 from pathlib import Path
 import shlex
+import signal
 import subprocess
 import tempfile
 import time
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 
 LOGGER = logging.getLogger("fix")
@@ -420,7 +422,7 @@ def default_state_path(repo: str, number: int) -> Path:
         or os.environ.get("XDG_CACHE_HOME")
         or str(Path.home() / ".cache")
     )
-    repo_slug = repo.replace("/", "-").replace(":", "-")
+    repo_slug = quote(repo, safe="")
     return Path(cache_root) / "fix" / f"{repo_slug}-pr-{number}.json"
 
 
@@ -505,7 +507,7 @@ def validate_agent_checkout(
     current_sha = local_git_value(runner, workdir, ["rev-parse", "HEAD"])
     if current_sha != pull_request.head_sha:
         raise MonitorError(
-            "Refusing to launch the repair agent: "
+            "Refusing to use the checkout for an agent: "
             f"checkout is {current_sha[:12]}, PR #{pull_request.number} head is "
             f"{pull_request.head_sha[:12]}. "
             "Synchronizing cannot continue until this worktree matches the PR head. "
@@ -516,7 +518,8 @@ def validate_agent_checkout(
     dirty = local_git_value(runner, workdir, ["status", "--porcelain"])
     if dirty:
         raise MonitorError(
-            "Refusing to launch the repair agent: checkout has uncommitted changes; "
+            "Refusing to use the checkout for an agent: "
+            "checkout has uncommitted changes; "
             "clean it before running fix."
         )
 
@@ -753,7 +756,11 @@ class AgentLauncher:
             f"Prompt:\n{prompt}\n"
         )
         try:
-            process = subprocess.Popen(command, cwd=str(self.workdir))
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.workdir),
+                start_new_session=True,
+            )
         except FileNotFoundError as error:
             raise MonitorError(
                 f"Agent command not found: {command[0]!r}; "
@@ -763,14 +770,24 @@ class AgentLauncher:
         try:
             returncode = process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            self._kill_process_group(process)
             returncode = 124
             with log_path.open("a") as log_file:
                 log_file.write(f"Timed out after {DEFAULT_AGENT_TIMEOUT:g} seconds.\n")
+        except KeyboardInterrupt:
+            self._kill_process_group(process)
+            raise
         with log_path.open("a") as log_file:
             log_file.write(f"Finished: {timestamp()}\nExit code: {returncode}\n")
         return returncode
+
+    @staticmethod
+    def _kill_process_group(process: subprocess.Popen) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
 
 
 def build_conflict_prompt(
@@ -842,6 +859,55 @@ def launch_conflict_agent(
         log_path,
     )
     return agent_launcher.launch(prompt, log_path)
+
+
+def synchronize_with_conflict_resolution(
+    *,
+    runner: CommandRunner,
+    github: GitHubClient,
+    workdir: Path,
+    pull_request: PullRequest,
+    state_path: Path,
+    agent_launcher: AgentLauncher,
+) -> PullRequest:
+    try:
+        return synchronize_pull_request(
+            runner=runner,
+            github=github,
+            workdir=workdir,
+            pull_request=pull_request,
+        )
+    except CommandError as error:
+        if is_update_branch_workflow_scope_error(error):
+            raise MonitorError(
+                "GitHub refused to update the pull request because the "
+                "`gh` OAuth token lacks the `workflow` scope. Run "
+                "`gh auth refresh --hostname github.com --scopes workflow` "
+                "and retry."
+            ) from error
+        if not is_update_branch_conflict(error):
+            raise
+
+        returncode = launch_conflict_agent(
+            pull_request=pull_request,
+            workdir=workdir,
+            state_path=state_path,
+            agent_launcher=agent_launcher,
+        )
+        if returncode == 0:
+            LOGGER.info("The conflict-resolution agent completed successfully.")
+        else:
+            LOGGER.error(
+                "The conflict-resolution agent failed with exit code %d.",
+                returncode,
+            )
+        updated_pull_request = github.get_pull_request(str(pull_request.number))
+        return synchronize_pull_request(
+            runner=runner,
+            github=github,
+            workdir=workdir,
+            pull_request=updated_pull_request,
+        )
 
 
 def build_agent_prompt(
@@ -1011,6 +1077,83 @@ class Monitor:
         self.poll_count = 0
         self._initial_check_snapshot = initial_check_snapshot
 
+    def _synchronize_conflicts(self, pull_request: PullRequest) -> bool:
+        LOGGER.info(
+            "Monitoring found merge conflicts for PR #%d; synchronizing with "
+            "base branch `%s`.",
+            pull_request.number,
+            pull_request.base_branch or "(unknown)",
+        )
+        synchronized_pull_request = synchronize_with_conflict_resolution(
+            runner=self.runner,
+            github=self.github,
+            workdir=self.workdir,
+            pull_request=pull_request,
+            state_path=self.state_store.path,
+            agent_launcher=self.agent_launcher,
+        )
+        if synchronized_pull_request.head_sha != pull_request.head_sha:
+            LOGGER.info(
+                "Conflict synchronization advanced PR #%d to %s. "
+                "Waiting for GitHub to recognize the new head and start CI.",
+                pull_request.number,
+                synchronized_pull_request.head_sha[:12],
+            )
+        else:
+            LOGGER.info(
+                "Conflict synchronization completed without changing the PR head."
+            )
+        return False
+
+    def _verify_agent_result(
+        self,
+        *,
+        pull_request: PullRequest,
+        state: dict[str, Any],
+        agent_kind: str,
+    ) -> Optional[PullRequest]:
+        try:
+            updated_pull_request = self.github.get_pull_request(self.target)
+        except MonitorError as error:
+            self.poll_again_immediately = False
+            self.state_store.save(state)
+            LOGGER.warning(
+                "Could not verify the PR head after the %s agent: %s",
+                agent_kind,
+                error,
+            )
+            return None
+
+        if updated_pull_request.head_sha == pull_request.head_sha:
+            LOGGER.info(
+                "The %s agent finished without a visible remote head change.",
+                agent_kind,
+            )
+        else:
+            LOGGER.info(
+                "The PR head advanced from %s to %s.",
+                pull_request.head_sha[:12],
+                updated_pull_request.head_sha[:12],
+            )
+
+        try:
+            validate_agent_checkout(
+                runner=self.runner,
+                workdir=self.workdir,
+                pull_request=updated_pull_request,
+            )
+        except MonitorError as error:
+            self.poll_again_immediately = False
+            self.state_store.save(state)
+            LOGGER.error(
+                "The %s agent did not leave a clean checkout matching the "
+                "remote PR head: %s",
+                agent_kind,
+                error,
+            )
+            return None
+        return updated_pull_request
+
     def poll_once(self) -> bool:
         self.poll_again_immediately = False
         self.poll_count += 1
@@ -1025,6 +1168,10 @@ class Monitor:
                 "merged" if pull_request.merged_at else pull_request.state.lower(),
             )
             return True
+
+        if pull_request.has_merge_conflicts:
+            self._initial_check_snapshot = None
+            return self._synchronize_conflicts(pull_request)
 
         initial_check_snapshot = self._initial_check_snapshot
         if (
@@ -1152,21 +1299,15 @@ class Monitor:
         returncode = self.agent_launcher.launch(prompt, log_path)
         self.poll_again_immediately = True
 
-        try:
-            updated_pull_request = self.github.get_pull_request(self.target)
-        except MonitorError as error:
-            LOGGER.warning("Could not verify the PR head after the agent: %s", error)
-        else:
-            if updated_pull_request.head_sha == pull_request.head_sha:
-                LOGGER.warning(
-                    "The repair agent finished without a visible remote head change."
-                )
-            else:
-                LOGGER.info(
-                    "The PR head advanced from %s to %s.",
-                    pull_request.head_sha[:12],
-                    updated_pull_request.head_sha[:12],
-                )
+        if (
+            self._verify_agent_result(
+                pull_request=pull_request,
+                state=state,
+                agent_kind="repair",
+            )
+            is None
+        ):
+            return False
 
         attempts_by_head[pull_request.head_sha] = attempts + 1
         for key, _ in new_failures:
@@ -1214,21 +1355,15 @@ class Monitor:
         returncode = self.agent_launcher.launch(prompt, log_path)
         self.poll_again_immediately = True
 
-        try:
-            updated_pull_request = self.github.get_pull_request(self.target)
-        except MonitorError as error:
-            LOGGER.warning("Could not verify the PR head after the review agent: %s", error)
-        else:
-            if updated_pull_request.head_sha == pull_request.head_sha:
-                LOGGER.info(
-                    "The review agent finished without a visible remote head change."
-                )
-            else:
-                LOGGER.info(
-                    "The PR head advanced from %s to %s.",
-                    pull_request.head_sha[:12],
-                    updated_pull_request.head_sha[:12],
-                )
+        if (
+            self._verify_agent_result(
+                pull_request=pull_request,
+                state=state,
+                agent_kind="review",
+            )
+            is None
+        ):
+            return False
 
         for key, _ in new_reviews:
             seen_reviews[key] = {"seen_at": timestamp()}
@@ -1328,46 +1463,14 @@ def run(
                     initial_pull_request.number,
                     initial_pull_request.base_branch or "(unknown)",
                 )
-                synchronized_pull_request = initial_pull_request
-                try:
-                    synchronized_pull_request = synchronize_pull_request(
-                        runner=runner,
-                        github=github,
-                        workdir=workdir,
-                        pull_request=initial_pull_request,
-                    )
-                except CommandError as error:
-                    if is_update_branch_workflow_scope_error(error):
-                        raise MonitorError(
-                            "GitHub refused to update the pull request because the "
-                            "`gh` OAuth token lacks the `workflow` scope. Run "
-                            "`gh auth refresh --hostname github.com --scopes workflow` "
-                            "and retry."
-                        ) from error
-                    if not is_update_branch_conflict(error):
-                        raise
-                    returncode = launch_conflict_agent(
-                        pull_request=initial_pull_request,
-                        workdir=workdir,
-                        state_path=state_path,
-                        agent_launcher=agent_launcher,
-                    )
-                    if returncode == 0:
-                        LOGGER.info(
-                            "The conflict-resolution agent completed successfully."
-                        )
-                    else:
-                        LOGGER.error(
-                            "The conflict-resolution agent failed with exit code %d.",
-                            returncode,
-                        )
-                    updated_pull_request = github.get_pull_request(target)
-                    synchronized_pull_request = synchronize_pull_request(
-                        runner=runner,
-                        github=github,
-                        workdir=workdir,
-                        pull_request=updated_pull_request,
-                    )
+                synchronized_pull_request = synchronize_with_conflict_resolution(
+                    runner=runner,
+                    github=github,
+                    workdir=workdir,
+                    pull_request=initial_pull_request,
+                    state_path=state_path,
+                    agent_launcher=agent_launcher,
+                )
                 if synchronized_pull_request.head_sha != initial_pull_request.head_sha:
                     initial_check_snapshot = None
                     LOGGER.info(

@@ -1,6 +1,7 @@
 import dataclasses
 import json
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -109,7 +110,13 @@ class StateStoreTests(unittest.TestCase):
     def test_default_path_uses_fix_namespace(self):
         self.assertEqual(
             default_state_path("example-org/example-repo", 123).parts[-2:],
-            ("fix", "example-org-example-repo-pr-123.json"),
+            ("fix", "example-org%2Fexample-repo-pr-123.json"),
+        )
+
+    def test_default_path_keeps_distinct_repositories_distinct(self):
+        self.assertNotEqual(
+            default_state_path("foo/bar-baz", 123),
+            default_state_path("foo-bar/baz", 123),
         )
 
     def test_save_and_load_is_json(self):
@@ -524,6 +531,7 @@ class AgentLauncherTests(unittest.TestCase):
     @mock.patch("fix.subprocess.Popen")
     def test_launches_codex_with_terminal_stdio(self, popen):
         process = popen.return_value
+        process.pid = 123
         process.wait.return_value = 0
         workdir = Path("/tmp/example-repo")
 
@@ -538,8 +546,64 @@ class AgentLauncherTests(unittest.TestCase):
         popen.assert_called_once_with(
             build_agent_command(workdir=workdir, prompt="Fix the failure."),
             cwd=str(workdir),
+            start_new_session=True,
         )
         process.wait.assert_called_once_with(timeout=2 * 60 * 60)
+
+    @mock.patch("fix.os.killpg")
+    @mock.patch("fix.subprocess.Popen")
+    def test_timeout_kills_the_entire_agent_process_group(self, popen, killpg):
+        process = popen.return_value
+        process.pid = 123
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("codex", 2 * 60 * 60),
+            0,
+        ]
+        workdir = Path("/tmp/example-repo")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "agent.log"
+            result = AgentLauncher(workdir=workdir).launch(
+                "Fix the failure.",
+                log_path,
+            )
+
+        self.assertEqual(result, 124)
+        killpg.assert_called_once_with(123, signal.SIGKILL)
+        process.wait.assert_has_calls(
+            [
+                mock.call(timeout=2 * 60 * 60),
+                mock.call(),
+            ]
+        )
+
+    @mock.patch("fix.os.killpg")
+    @mock.patch("fix.subprocess.Popen")
+    def test_keyboard_interrupt_kills_the_agent_process_group(
+        self,
+        popen,
+        killpg,
+    ):
+        process = popen.return_value
+        process.pid = 123
+        process.wait.side_effect = [KeyboardInterrupt(), 0]
+        workdir = Path("/tmp/example-repo")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "agent.log"
+            with self.assertRaises(KeyboardInterrupt):
+                AgentLauncher(workdir=workdir).launch(
+                    "Fix the failure.",
+                    log_path,
+                )
+
+        killpg.assert_called_once_with(123, signal.SIGKILL)
+        process.wait.assert_has_calls(
+            [
+                mock.call(timeout=2 * 60 * 60),
+                mock.call(),
+            ]
+        )
 
 
 class PromptTests(unittest.TestCase):
@@ -949,6 +1013,43 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(github.check_calls, 0)
         self.assertNotIn("Checking PR #123", "\n".join(logs.output))
 
+    def test_conflicts_detected_during_monitor_trigger_synchronization(self):
+        conflicted_pull_request = dataclasses.replace(
+            self.pull_request,
+            merge_state_status="DIRTY",
+        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = conflicted_pull_request
+        github.runner = mock.Mock()
+        agent = FakeAgent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            with mock.patch(
+                "fix.synchronize_pull_request",
+                return_value=conflicted_pull_request,
+            ) as synchronize:
+                self.assertFalse(monitor.poll_once())
+
+        synchronize.assert_called_once_with(
+            runner=github.runner,
+            github=github,
+            workdir=Path(directory),
+            pull_request=conflicted_pull_request,
+        )
+        github.get_checks.assert_not_called()
+        github.get_reviews.assert_not_called()
+        self.assertEqual(agent.prompts, [])
+
     def test_launches_once_for_a_persistent_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             state_store = StateStore(Path(directory) / "state.json")
@@ -1077,6 +1178,82 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("narrower helper", agent.prompts[0][0])
             self.assertFalse(monitor.poll_once())
             self.assertEqual(len(agent.prompts), 1)
+
+    def test_review_changes_are_not_marked_seen_if_checkout_is_dirty(self):
+        review = Review(
+            id="review-1",
+            author_login="maintainer",
+            state="COMMENTED",
+            body="Consider a narrower helper.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha=self.pull_request.head_sha,
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        class Runner:
+            def __init__(self):
+                self.dirty = ""
+
+            def run(self, command, *, cwd=None):
+                if command[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(command, 0, "abc123", "")
+                if command[:2] == ["git", "status"]:
+                    return subprocess.CompletedProcess(command, 0, self.dirty, "")
+                raise AssertionError(f"unexpected command: {command}")
+
+        class Github:
+            def __init__(self, runner):
+                self.runner = runner
+
+            def get_pull_request(self, target):
+                return self_pull_request
+
+            def get_checks(self, pull_request):
+                return [passed_check]
+
+            def get_reviews(self, pull_request):
+                return [review]
+
+        class DirtyAgent:
+            def __init__(self, runner):
+                self.runner = runner
+                self.launch_count = 0
+
+            def launch(self, prompt, log_path):
+                self.launch_count += 1
+                self.runner.dirty = " M generated.py"
+                return 0
+
+        self_pull_request = self.pull_request
+        runner = Runner()
+        github = Github(runner)
+        agent = DirtyAgent(runner)
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=runner,
+            )
+
+            self.assertFalse(monitor.poll_once())
+            self.assertEqual(state_store.load()["seen_reviews"], {})
+            self.assertFalse(monitor.poll_once())
+
+        self.assertEqual(agent.launch_count, 1)
 
     def test_passed_ci_ignores_own_review_and_stops(self):
         own_review = Review(
