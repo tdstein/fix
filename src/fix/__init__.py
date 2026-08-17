@@ -88,10 +88,26 @@ class PullRequest:
     base_branch: str
     head_repo: str = ""
     author_login: str = ""
+    mergeable: str = ""
+    merge_state_status: str = ""
 
     @property
     def is_open(self) -> bool:
         return self.state.upper() == "OPEN" and not self.merged_at
+
+    @property
+    def has_merge_conflicts(self) -> bool:
+        return (
+            self.mergeable.upper() == "CONFLICTING"
+            or self.merge_state_status.upper() == "DIRTY"
+        )
+
+    @property
+    def mergeability_is_known(self) -> bool:
+        return any(
+            value.upper() not in {"", "UNKNOWN"}
+            for value in (self.mergeable, self.merge_state_status)
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -144,6 +160,38 @@ class Check:
         }
         serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class CheckSnapshot:
+    head_sha: str
+    checks_reported: bool
+    checks: tuple[Check, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class StartupStatus:
+    checks_reported: bool
+    total_checks: int
+    passed_checks: int
+    failed_checks: int
+    pending_checks: int
+    has_merge_conflicts: bool
+    mergeability_is_known: bool
+    check_snapshot: Optional[CheckSnapshot] = None
+
+    @property
+    def ci_is_green(self) -> bool:
+        return (
+            self.checks_reported
+            and self.total_checks > 0
+            and self.failed_checks == 0
+            and self.pending_checks == 0
+        )
+
+    @property
+    def should_synchronize(self) -> bool:
+        return self.failed_checks > 0 or self.has_merge_conflicts
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,7 +333,7 @@ class GitHubClient:
                 "--json",
                 (
                     "number,title,url,state,mergedAt,author,headRefOid,headRefName,"
-                    "baseRefName,headRepository"
+                    "baseRefName,headRepository,mergeable,mergeStateStatus"
                 ),
             ]
         )
@@ -315,6 +363,8 @@ class GitHubClient:
                 base_branch=str(value.get("baseRefName") or ""),
                 head_repo=head_repo,
                 author_login=author_login,
+                mergeable=str(value.get("mergeable") or ""),
+                merge_state_status=str(value.get("mergeStateStatus") or ""),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise MonitorError(
@@ -526,6 +576,131 @@ def is_update_branch_workflow_scope_error(error: CommandError) -> bool:
         and "scope" in stderr
         and "oauth" in stderr
     )
+
+
+def summarize_checks(
+    checks: Sequence[Check],
+    *,
+    checks_reported: bool,
+) -> tuple[str, str]:
+    if not checks_reported:
+        return "wait", "checks not reported yet"
+
+    passed_checks = sum(check.is_pass for check in checks)
+    failed_checks = sum(check.is_failure for check in checks)
+    pending_checks = sum(not check.is_complete for check in checks)
+    if failed_checks:
+        state = "fail"
+    elif checks and pending_checks == 0:
+        state = "pass"
+    else:
+        state = "wait"
+    details = (
+        f"{len(checks)} total · "
+        f"{passed_checks} passed · "
+        f"{failed_checks} failed · "
+        f"{pending_checks} pending"
+    )
+    return state, details
+
+
+def format_ci_check(
+    checks: Sequence[Check],
+    *,
+    checks_reported: bool,
+) -> str:
+    state, details = summarize_checks(
+        checks,
+        checks_reported=checks_reported,
+    )
+    return f"CI ......... {state:<4} ({details})"
+
+
+def inspect_startup(
+    *,
+    github: GitHubClient,
+    pull_request: PullRequest,
+) -> StartupStatus:
+    LOGGER.info("Startup checks (2)")
+    try:
+        checks = tuple(github.get_checks(pull_request))
+    except ChecksNotReportedError:
+        checks = ()
+        checks_reported = False
+    else:
+        checks_reported = True
+
+    passed_checks = sum(check.is_pass for check in checks)
+    failed_checks = sum(check.is_failure for check in checks)
+    pending_checks = sum(not check.is_complete for check in checks)
+    startup_status = StartupStatus(
+        checks_reported=checks_reported,
+        total_checks=len(checks),
+        passed_checks=passed_checks,
+        failed_checks=failed_checks,
+        pending_checks=pending_checks,
+        has_merge_conflicts=pull_request.has_merge_conflicts,
+        mergeability_is_known=pull_request.mergeability_is_known,
+        check_snapshot=CheckSnapshot(
+            head_sha=pull_request.head_sha,
+            checks_reported=checks_reported,
+            checks=checks,
+        ),
+    )
+
+    LOGGER.info(
+        "  [1/2] %s",
+        format_ci_check(checks, checks_reported=checks_reported),
+    )
+
+    base_branch = pull_request.base_branch or "(unknown base)"
+    if startup_status.has_merge_conflicts:
+        merge_state = "fail"
+        merge_details = f"conflicts vs {base_branch}"
+    elif not startup_status.mergeability_is_known:
+        merge_state = "wait"
+        merge_details = f"still calculating vs {base_branch}"
+    else:
+        merge_state = "pass"
+        merge_details = f"no conflicts vs {base_branch}"
+    LOGGER.info(
+        "  [2/2] Mergeable .. %-4s (%s)",
+        merge_state,
+        merge_details,
+    )
+    return startup_status
+
+
+def should_synchronize_pull_request(
+    *,
+    github: GitHubClient,
+    pull_request: PullRequest,
+) -> bool:
+    return inspect_startup(
+        github=github,
+        pull_request=pull_request,
+    ).should_synchronize
+
+
+def log_startup_decision(status: StartupStatus) -> None:
+    if status.should_synchronize:
+        reasons = []
+        if status.failed_checks:
+            reasons.append("CI failures")
+        if status.has_merge_conflicts:
+            reasons.append("merge conflicts")
+        LOGGER.info(
+            "Startup requires action -> synchronizing (%s).",
+            " and ".join(reasons),
+        )
+    elif status.ci_is_green and status.mergeability_is_known:
+        LOGGER.info(
+            "Startup passed -> entering monitor.",
+        )
+    else:
+        LOGGER.info(
+            "Startup pending -> entering monitor while GitHub reports back.",
+        )
 
 
 def build_agent_command(
@@ -824,6 +999,7 @@ class Monitor:
         state_store: StateStore,
         agent_launcher: AgentLauncher,
         runner: Optional[CommandRunner] = None,
+        initial_check_snapshot: Optional[CheckSnapshot] = None,
     ) -> None:
         self.github = github
         self.target = target
@@ -832,9 +1008,12 @@ class Monitor:
         self.agent_launcher = agent_launcher
         self.runner = runner or github.runner
         self.poll_again_immediately = False
+        self.poll_count = 0
+        self._initial_check_snapshot = initial_check_snapshot
 
     def poll_once(self) -> bool:
         self.poll_again_immediately = False
+        self.poll_count += 1
         pull_request = self.github.get_pull_request(self.target)
         state = self.state_store.load()
 
@@ -847,20 +1026,33 @@ class Monitor:
             )
             return True
 
-        checks_reported = True
-        try:
-            checks = self.github.get_checks(pull_request)
-        except ChecksNotReportedError:
-            checks = []
-            checks_reported = False
+        initial_check_snapshot = self._initial_check_snapshot
+        if (
+            initial_check_snapshot is not None
+            and initial_check_snapshot.head_sha == pull_request.head_sha
+        ):
+            self._initial_check_snapshot = None
+            checks = initial_check_snapshot.checks
+            checks_reported = initial_check_snapshot.checks_reported
+            log_check_status = False
+        else:
+            self._initial_check_snapshot = None
+            checks_reported = True
+            try:
+                checks = self.github.get_checks(pull_request)
+            except ChecksNotReportedError:
+                checks = []
+                checks_reported = False
+            log_check_status = True
         failures = [check for check in checks if check.is_failure]
-        LOGGER.info(
-            "Polling PR #%s at head %s: %d checks, %d failed.",
-            pull_request.number,
-            pull_request.head_sha[:12],
-            len(checks),
-            len(failures),
-        )
+        if log_check_status:
+            LOGGER.info(
+                "%s PR #%s at head %s: %s.",
+                "Checking" if self.poll_count == 1 else "Polling",
+                pull_request.number,
+                pull_request.head_sha[:12],
+                format_ci_check(checks, checks_reported=checks_reported),
+            )
 
         if not failures:
             reviews = self.github.get_reviews(pull_request)
@@ -1089,6 +1281,7 @@ def run(
     effort: str = DEFAULT_AGENT_EFFORT,
 ) -> int:
     configure_logging()
+    started_at = time.monotonic()
     workdir = Path.cwd().resolve()
     runner = CommandRunner()
     github = GitHubClient(cwd=workdir, runner=runner)
@@ -1104,75 +1297,137 @@ def run(
         model=model,
         effort=effort,
     )
-    monitor = Monitor(
-        github=github,
-        target=target,
-        workdir=workdir,
-        state_store=state_store,
-        agent_launcher=agent_launcher,
-        runner=runner,
-    )
 
     LOGGER.info(
-        "Watching %s#%d; polling every %.0f minutes.",
+        "Watching %s#%d @ %s (agents act only when needed).",
         initial_pull_request.repo,
         initial_pull_request.number,
-        DEFAULT_INTERVAL / 60,
+        initial_pull_request.head_sha[:8],
     )
+    LOGGER.info(
+        "Exit when: all checks complete and no new reviews need attention.",
+    )
+    LOGGER.info(
+        "Poll interval %.0fm; agent timeout %.0fh.",
+        DEFAULT_INTERVAL / 60,
+        DEFAULT_AGENT_TIMEOUT / 60 / 60,
+    )
+    startup_status: Optional[StartupStatus] = None
+    initial_check_snapshot: Optional[CheckSnapshot] = None
     with state_lock(state_path):
         if initial_pull_request.is_open:
-            LOGGER.info(
-                "Synchronizing PR #%d with its base branch before monitoring.",
-                initial_pull_request.number,
+            startup_status = inspect_startup(
+                github=github,
+                pull_request=initial_pull_request,
             )
-            synchronized_pull_request = initial_pull_request
-            try:
-                synchronized_pull_request = synchronize_pull_request(
-                    runner=runner,
-                    github=github,
-                    workdir=workdir,
-                    pull_request=initial_pull_request,
-                )
-            except CommandError as error:
-                if is_update_branch_workflow_scope_error(error):
-                    raise MonitorError(
-                        "GitHub refused to update the pull request because the "
-                        "`gh` OAuth token lacks the `workflow` scope. Run "
-                        "`gh auth refresh --hostname github.com --scopes workflow` "
-                        "and retry."
-                    ) from error
-                if not is_update_branch_conflict(error):
-                    raise
-                returncode = launch_conflict_agent(
-                    pull_request=initial_pull_request,
-                    workdir=workdir,
-                    state_path=state_path,
-                    agent_launcher=agent_launcher,
-                )
-                if returncode == 0:
-                    LOGGER.info("The conflict-resolution agent completed successfully.")
-                else:
-                    LOGGER.error(
-                        "The conflict-resolution agent failed with exit code %d.",
-                        returncode,
-                    )
-                updated_pull_request = github.get_pull_request(target)
-                synchronized_pull_request = synchronize_pull_request(
-                    runner=runner,
-                    github=github,
-                    workdir=workdir,
-                    pull_request=updated_pull_request,
-                )
-            if synchronized_pull_request.head_sha != initial_pull_request.head_sha:
+            initial_check_snapshot = startup_status.check_snapshot
+            log_startup_decision(startup_status)
+            if startup_status.should_synchronize:
                 LOGGER.info(
-                    "Waiting for GitHub to recognize the synchronized PR #%d "
-                    "head and start CI before the first poll.",
+                    "Action: synchronizing PR #%d with base branch `%s`.",
                     initial_pull_request.number,
+                    initial_pull_request.base_branch or "(unknown)",
                 )
-                sleep_until_next_poll(DEFAULT_INTERVAL)
+                synchronized_pull_request = initial_pull_request
+                try:
+                    synchronized_pull_request = synchronize_pull_request(
+                        runner=runner,
+                        github=github,
+                        workdir=workdir,
+                        pull_request=initial_pull_request,
+                    )
+                except CommandError as error:
+                    if is_update_branch_workflow_scope_error(error):
+                        raise MonitorError(
+                            "GitHub refused to update the pull request because the "
+                            "`gh` OAuth token lacks the `workflow` scope. Run "
+                            "`gh auth refresh --hostname github.com --scopes workflow` "
+                            "and retry."
+                        ) from error
+                    if not is_update_branch_conflict(error):
+                        raise
+                    returncode = launch_conflict_agent(
+                        pull_request=initial_pull_request,
+                        workdir=workdir,
+                        state_path=state_path,
+                        agent_launcher=agent_launcher,
+                    )
+                    if returncode == 0:
+                        LOGGER.info(
+                            "The conflict-resolution agent completed successfully."
+                        )
+                    else:
+                        LOGGER.error(
+                            "The conflict-resolution agent failed with exit code %d.",
+                            returncode,
+                        )
+                    updated_pull_request = github.get_pull_request(target)
+                    synchronized_pull_request = synchronize_pull_request(
+                        runner=runner,
+                        github=github,
+                        workdir=workdir,
+                        pull_request=updated_pull_request,
+                    )
+                if synchronized_pull_request.head_sha != initial_pull_request.head_sha:
+                    initial_check_snapshot = None
+                    LOGGER.info(
+                        "Synchronization complete: PR #%d advanced to %s. "
+                        "Waiting for GitHub to recognize the new head and start CI.",
+                        initial_pull_request.number,
+                        synchronized_pull_request.head_sha[:12],
+                    )
+                    sleep_until_next_poll(DEFAULT_INTERVAL)
+                    LOGGER.info(
+                        "Synchronization ready -> entering monitor.",
+                    )
+                else:
+                    LOGGER.info(
+                        "Synchronization complete: the PR head is unchanged. "
+                        "Entering monitor.",
+                    )
+        monitor = Monitor(
+            github=github,
+            target=target,
+            workdir=workdir,
+            state_store=state_store,
+            agent_launcher=agent_launcher,
+            runner=runner,
+            initial_check_snapshot=initial_check_snapshot,
+        )
+        first_monitor_check = True
         while True:
             if monitor.poll_once():
+                elapsed = time.monotonic() - started_at
+                if first_monitor_check:
+                    LOGGER.info(
+                        "Exit condition met on the initial check; "
+                        "no interval polling needed.",
+                    )
+                if (
+                    startup_status is not None
+                    and startup_status.ci_is_green
+                    and not startup_status.has_merge_conflicts
+                    and startup_status.mergeability_is_known
+                ):
+                    LOGGER.info(
+                        "Done in %.0fs - #%d @ %s is green, conflict-free, "
+                        "with no new review work.",
+                        elapsed,
+                        initial_pull_request.number,
+                        initial_pull_request.head_sha[:8],
+                    )
+                    LOGGER.info(
+                        "Ready: checks are green, conflicts are clear, and "
+                        "no new reviews need attention.",
+                    )
+                else:
+                    LOGGER.info(
+                        "Done in %.0fs - PR #%d monitoring complete.",
+                        elapsed,
+                        initial_pull_request.number,
+                    )
                 return 0
+            first_monitor_check = False
             if getattr(monitor, "poll_again_immediately", False) is True:
                 LOGGER.info("Polling again immediately after agent exit.")
                 continue

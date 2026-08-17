@@ -88,12 +88,13 @@ no failures, it also checks pull request reviews. A review session summarizes
 feedback with you, applies small clearly correct fixes, and pauses for your
 judgment on subjective changes.
 
-Before monitoring an open pull request, `fix` asks GitHub to update its branch
-from the pull request's configured base branch, then refreshes the local
-checkout. If GitHub reports merge conflicts, it launches a bounded Codex
-session to resolve them and retries the synchronization. It does not
-recursively update parent pull requests in a stack; update those from the
-root toward the monitored pull request.
+Before monitoring an open pull request, `fix` checks its CI status and
+mergeability. It updates the branch from the pull request's configured base
+branch only when CI has a failure or GitHub reports merge conflicts. If GitHub
+reports merge conflicts, it launches a bounded Codex session to resolve them
+and retries the synchronization. It does not recursively update parent pull
+requests in a stack; update those from the root toward the monitored pull
+request.
 
 ## State and logs
 

@@ -139,6 +139,7 @@ class RunTests(unittest.TestCase):
         )
         github = mock.Mock()
         github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = []
         monitor = mock.Mock()
         monitor.poll_once.return_value = True
         lock = mock.MagicMock()
@@ -155,6 +156,84 @@ class RunTests(unittest.TestCase):
             self.assertEqual(fix.run(), 0)
 
         state_store.assert_called_once_with(Path("/tmp/state.json"))
+
+    def test_run_skips_initial_synchronization_for_green_clean_pr(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            mergeable="MERGEABLE",
+            merge_state_status="CLEAN",
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="",
+            completed_at="",
+            description="",
+        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = [passed_check]
+        monitor = mock.Mock()
+        monitor.poll_once.return_value = True
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+
+        with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+            with mock.patch("fix.configure_logging"), \
+                mock.patch("fix.GitHubClient", return_value=github), \
+                mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+                mock.patch("fix.StateStore"), \
+                mock.patch("fix.AgentLauncher"), \
+                mock.patch("fix.Monitor", return_value=monitor), \
+                mock.patch("fix.synchronize_pull_request") as synchronize, \
+                mock.patch("fix.state_lock", return_value=lock):
+                self.assertEqual(fix.run(), 0)
+
+        synchronize.assert_not_called()
+        output = "\n".join(logs.output)
+        self.assertIn(
+            "Watching example-org/example-repo#123 @ abc123 (agents act only when needed).",
+            output,
+        )
+        self.assertIn(
+            "Exit when: all checks complete and no new reviews need attention.",
+            output,
+        )
+        self.assertIn("Poll interval 5m; agent timeout 2h.", output)
+        self.assertIn("Startup checks (2)", output)
+        self.assertIn(
+            "[1/2] CI ......... pass "
+            "(1 total · 1 passed · 0 failed · 0 pending)",
+            output,
+        )
+        self.assertIn(
+            "[2/2] Mergeable .. pass (no conflicts vs main)",
+            output,
+        )
+        self.assertIn(
+            "Startup passed -> entering monitor.",
+            output,
+        )
+        self.assertIn(
+            "Exit condition met on the initial check; no interval polling needed.",
+            output,
+        )
+        self.assertIn(
+            "Ready: checks are green, conflicts are clear, and "
+            "no new reviews need attention.",
+            output,
+        )
 
     def test_run_polls_immediately_after_an_agent_exits(self):
         pull_request = PullRequest(
@@ -183,6 +262,7 @@ class RunTests(unittest.TestCase):
 
         github = mock.Mock()
         github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = []
         monitor = ImmediatePollMonitor()
         lock = mock.MagicMock()
         lock.__enter__.return_value = lock
@@ -219,6 +299,18 @@ class RunTests(unittest.TestCase):
         )
         github = mock.Mock()
         github.get_pull_request.return_value = initial_pull_request
+        github.get_checks.return_value = [
+            fix.Check(
+                name="ci",
+                state="FAILURE",
+                bucket="fail",
+                workflow="ci",
+                link="",
+                started_at="",
+                completed_at="",
+                description="",
+            )
+        ]
         monitor = mock.Mock()
         monitor.poll_once.side_effect = lambda: (events.append("poll") or True)
         lock = mock.MagicMock()
@@ -256,6 +348,7 @@ class RunTests(unittest.TestCase):
             head_sha="abc123",
             head_branch="fix-ci",
             base_branch="main",
+            merge_state_status="DIRTY",
         )
         updated_pull_request = dataclasses.replace(
             initial_pull_request,
@@ -266,6 +359,7 @@ class RunTests(unittest.TestCase):
             initial_pull_request,
             updated_pull_request,
         ]
+        github.get_checks.return_value = []
         monitor = mock.Mock()
         monitor.poll_once.return_value = True
         lock = mock.MagicMock()
@@ -315,9 +409,11 @@ class RunTests(unittest.TestCase):
             head_sha="abc123",
             head_branch="fix-ci",
             base_branch="main",
+            merge_state_status="DIRTY",
         )
         github = mock.Mock()
         github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = []
         lock = mock.MagicMock()
         lock.__enter__.return_value = lock
         workflow_scope_error = fix.CommandError(
@@ -574,6 +670,8 @@ class GitHubClientTests(unittest.TestCase):
                                 "headRefOid": "abc123",
                                 "headRefName": "fix-ci",
                                 "baseRefName": "main",
+                                "mergeable": "MERGEABLE",
+                                "mergeStateStatus": "CLEAN",
                                 "headRepository": {
                                     "nameWithOwner": "example-org/example-repo"
                                 },
@@ -593,6 +691,8 @@ class GitHubClientTests(unittest.TestCase):
         self.assertEqual(runner.calls[1][0][3], "--json")
         self.assertEqual(runner.calls[1][1], workdir)
         self.assertEqual(pull_request.author_login, "contributor")
+        self.assertEqual(pull_request.mergeable, "MERGEABLE")
+        self.assertEqual(pull_request.merge_state_status, "CLEAN")
 
     def test_reviews_are_loaded_from_pull_request_view(self):
         class Runner:
@@ -727,6 +827,7 @@ class FakeGitHub:
         self.last_pull_request = pull_requests[-1]
         self.checks = checks
         self.reviews = reviews or []
+        self.check_calls = 0
         self.review_calls = 0
         self.runner = FakeRunner(pull_requests[0].head_sha)
 
@@ -739,6 +840,7 @@ class FakeGitHub:
         return self.last_pull_request
 
     def get_checks(self, pull_request):
+        self.check_calls += 1
         return self.checks
 
     def get_reviews(self, pull_request):
@@ -778,6 +880,74 @@ class MonitorTests(unittest.TestCase):
             completed_at="2026-08-14T12:10:00Z",
             description="compiler error",
         )
+
+    def test_check_log_uses_startup_summary_format(self):
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [passed_check])
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=FakeAgent(),
+                runner=github.runner,
+            )
+
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                self.assertTrue(monitor.poll_once())
+
+        self.assertIn(
+            "Checking PR #123 at head abc123: CI ......... pass "
+            "(1 total · 1 passed · 0 failed · 0 pending).",
+            "\n".join(logs.output),
+        )
+
+    def test_initial_check_snapshot_is_reused_for_first_poll(self):
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [passed_check])
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=FakeAgent(),
+                runner=github.runner,
+                initial_check_snapshot=fix.CheckSnapshot(
+                    head_sha=self.pull_request.head_sha,
+                    checks_reported=True,
+                    checks=(passed_check,),
+                ),
+            )
+
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                self.assertTrue(monitor.poll_once())
+
+        self.assertEqual(github.check_calls, 0)
+        self.assertNotIn("Checking PR #123", "\n".join(logs.output))
 
     def test_launches_once_for_a_persistent_failure(self):
         with tempfile.TemporaryDirectory() as directory:
