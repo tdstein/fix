@@ -278,6 +278,24 @@ class StateStoreTests(unittest.TestCase):
 
 
 class RunTests(unittest.TestCase):
+    def test_run_exits_cleanly_when_current_branch_has_no_pull_request(self):
+        github = mock.Mock()
+        github.get_pull_request.return_value = None
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.StateStore") as state_store, \
+            mock.patch("fix.AgentLauncher") as agent_launcher:
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                self.assertEqual(fix.run(), 0)
+
+        self.assertIn(
+            "No pull request found for the current branch; nothing to fix.",
+            "\n".join(logs.output),
+        )
+        state_store.assert_not_called()
+        agent_launcher.assert_not_called()
+
     def test_run_constructs_state_store_with_only_its_path(self):
         pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -908,6 +926,32 @@ class ReviewPromptTests(unittest.TestCase):
 
 
 class GitHubClientTests(unittest.TestCase):
+    def test_current_branch_without_pull_request_returns_none(self):
+        class Runner:
+            def run(self, command, *, cwd=None):
+                if command[:3] == ["gh", "repo", "view"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "example-org/example-repo\n",
+                        "",
+                    )
+                if command[:3] == ["gh", "pr", "view"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        1,
+                        "",
+                        'no pull requests found for branch "main"',
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        self.assertIsNone(
+            GitHubClient(
+                cwd=Path("/tmp/example-repo"),
+                runner=Runner(),
+            ).get_pull_request()
+        )
+
     def test_initial_pull_request_lookup_uses_current_branch(self):
         class Runner:
             def __init__(self):

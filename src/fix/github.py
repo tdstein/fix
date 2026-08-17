@@ -77,7 +77,10 @@ class GitHubClient:
         self.repo = output
         return output
 
-    def get_pull_request(self, target: Optional[str] = None) -> PullRequest:
+    def get_pull_request(
+        self,
+        target: Optional[str] = None,
+    ) -> Optional[PullRequest]:
         repo = self.resolve_repo()
         command = ["gh", "pr", "view"]
         if target is not None:
@@ -92,6 +95,12 @@ class GitHubClient:
             ]
         )
         result = self.runner.run(command, cwd=self.cwd)
+        if (
+            target is None
+            and result.returncode != 0
+            and "no pull requests found for branch" in result.stderr.casefold()
+        ):
+            return None
         value = _parse_json_output(result, command)
         try:
             number = int(value["number"])

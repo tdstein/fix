@@ -260,6 +260,9 @@ def run(
     runner = deps.command_runner_factory()
     github = deps.github_client_factory(cwd=workdir, runner=runner)
     initial_pull_request = github.get_pull_request()
+    if initial_pull_request is None:
+        LOGGER.info("No pull request found for the current branch; nothing to fix.")
+        return 0
     target = str(initial_pull_request.number)
     state_path = deps.default_state_path(
         initial_pull_request.repo,
