@@ -24,6 +24,7 @@ from .constants import (
 from .errors import MonitorError
 from .github import CommandRunner, GitHubClient
 from .monitor import Monitor
+from .models import PullRequest
 from .state import StateStore, default_state_path, state_lock
 from .ui import CONSOLE, FixHighlighter, render_monitor_header as render_header
 
@@ -50,6 +51,49 @@ def configure_logging() -> None:
 def sleep_until_next_poll(seconds: float) -> None:
     LOGGER.info("Next poll in %.0f minutes.", seconds / 60)
     time.sleep(seconds)
+
+
+def log_monitor_completion(
+    *,
+    monitor: Monitor,
+    first_monitor_check: bool,
+    elapsed: float,
+    pull_request: PullRequest,
+    startup_status: Optional[Any],
+) -> None:
+    steps = []
+    stop_reason = getattr(monitor, "stop_reason", None)
+    if isinstance(stop_reason, str):
+        steps.append(f"Stopping: {stop_reason}")
+    if first_monitor_check:
+        steps.append(
+            "Exit condition met on the initial check; "
+            "no interval polling needed."
+        )
+    if (
+        startup_status is not None
+        and startup_status.ci_is_green
+        and not startup_status.has_merge_conflicts
+        and startup_status.mergeability_is_known
+    ):
+        steps.append(
+            f"Done in {elapsed:.0f}s - #{pull_request.number} @ "
+            f"{pull_request.head_sha[:8]} is green, conflict-free, "
+            "with no new review work."
+        )
+        steps.append(
+            "Ready: checks are green, conflicts are clear, and "
+            "no new reviews need attention."
+        )
+    else:
+        steps.append(
+            f"Done in {elapsed:.0f}s - PR #{pull_request.number} "
+            "monitoring complete."
+        )
+
+    total = len(steps)
+    for index, step in enumerate(steps, start=1):
+        LOGGER.info("  [%d/%d] %s", index, total, step)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -205,34 +249,13 @@ def run(
         while True:
             if monitor.poll_once():
                 elapsed = time.monotonic() - started_at
-                if first_monitor_check:
-                    LOGGER.info(
-                        "Exit condition met on the initial check; "
-                        "no interval polling needed.",
-                    )
-                if (
-                    startup_status is not None
-                    and startup_status.ci_is_green
-                    and not startup_status.has_merge_conflicts
-                    and startup_status.mergeability_is_known
-                ):
-                    LOGGER.info(
-                        "Done in %.0fs - #%d @ %s is green, conflict-free, "
-                        "with no new review work.",
-                        elapsed,
-                        initial_pull_request.number,
-                        initial_pull_request.head_sha[:8],
-                    )
-                    LOGGER.info(
-                        "Ready: checks are green, conflicts are clear, and "
-                        "no new reviews need attention.",
-                    )
-                else:
-                    LOGGER.info(
-                        "Done in %.0fs - PR #%d monitoring complete.",
-                        elapsed,
-                        initial_pull_request.number,
-                    )
+                log_monitor_completion(
+                    monitor=monitor,
+                    first_monitor_check=first_monitor_check,
+                    elapsed=elapsed,
+                    pull_request=initial_pull_request,
+                    startup_status=startup_status,
+                )
                 return 0
             first_monitor_check = False
             if getattr(monitor, "poll_again_immediately", False) is True:

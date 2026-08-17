@@ -44,6 +44,7 @@ class Monitor:
         self.runner = runner or github.runner
         self.poll_again_immediately = False
         self.poll_count = 0
+        self.stop_reason: Optional[str] = None
         self._initial_check_snapshot = initial_check_snapshot
         self._synchronize_with_conflict_resolution = (
             synchronize_with_conflict_resolution_fn
@@ -129,16 +130,16 @@ class Monitor:
 
     def poll_once(self) -> bool:
         self.poll_again_immediately = False
+        self.stop_reason = None
         self.poll_count += 1
         pull_request = self.github.get_pull_request(self.target)
         state = self.state_store.load()
 
         if not pull_request.is_open:
             self.state_store.save(state)
-            LOGGER.info(
-                "Stopping: PR #%s is %s.",
-                pull_request.number,
-                "merged" if pull_request.merged_at else pull_request.state.lower(),
+            self.stop_reason = (
+                f"PR #{pull_request.number} is "
+                f"{'merged' if pull_request.merged_at else pull_request.state.lower()}."
             )
             return True
 
@@ -198,9 +199,9 @@ class Monitor:
 
             if checks_reported and all(check.is_complete for check in checks):
                 self.state_store.save(state)
-                LOGGER.info(
-                    "Stopping: CI is complete with %d checks and no new reviews.",
-                    len(checks),
+                self.stop_reason = (
+                    f"CI is complete with {len(checks)} checks "
+                    "and no new reviews."
                 )
                 return True
 

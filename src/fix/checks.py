@@ -125,7 +125,7 @@ def log_startup_decision(status: StartupStatus) -> None:
         )
     elif status.ci_is_green and status.mergeability_is_known:
         LOGGER.info(
-            "Startup passed -> entering monitor.",
+            "Monitoring...",
         )
     else:
         LOGGER.info(

@@ -291,6 +291,7 @@ class RunTests(unittest.TestCase):
         github.get_checks.return_value = [passed_check]
         monitor = mock.Mock()
         monitor.poll_once.return_value = True
+        monitor.stop_reason = "CI is complete with 1 checks and no new reviews."
         lock = mock.MagicMock()
         lock.__enter__.return_value = lock
 
@@ -327,15 +328,20 @@ class RunTests(unittest.TestCase):
             output,
         )
         self.assertIn(
-            "Startup passed -> entering monitor.",
+            "Monitoring...",
             output,
         )
         self.assertIn(
-            "Exit condition met on the initial check; no interval polling needed.",
+            "[1/4] Stopping: CI is complete with 1 checks and no new reviews.",
             output,
         )
         self.assertIn(
-            "Ready: checks are green, conflicts are clear, and "
+            "[2/4] Exit condition met on the initial check; "
+            "no interval polling needed.",
+            output,
+        )
+        self.assertIn(
+            "[4/4] Ready: checks are green, conflicts are clear, and "
             "no new reviews need attention.",
             output,
         )
@@ -1112,11 +1118,13 @@ class MonitorTests(unittest.TestCase):
                 ),
             )
 
-            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
-                self.assertTrue(monitor.poll_once())
+            self.assertTrue(monitor.poll_once())
 
         self.assertEqual(github.check_calls, 0)
-        self.assertNotIn("Checking PR #123", "\n".join(logs.output))
+        self.assertEqual(
+            monitor.stop_reason,
+            "CI is complete with 1 checks and no new reviews.",
+        )
 
     def test_conflicts_detected_during_monitor_trigger_synchronization(self):
         conflicted_pull_request = dataclasses.replace(
