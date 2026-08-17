@@ -8,9 +8,6 @@ import subprocess
 import time
 from typing import Callable, Sequence
 
-from rich.live import Live
-from rich.text import Text
-
 from .constants import (
     DEFAULT_AGENT_EFFORT,
     DEFAULT_AGENT_MODEL,
@@ -26,7 +23,6 @@ from .repository import (
     synchronize_pull_request,
 )
 from .state import timestamp
-from .ui import CONSOLE
 
 
 def build_agent_command(
@@ -117,33 +113,9 @@ class AgentLauncher:
         return returncode
 
     def _wait_for_process(self, process: subprocess.Popen) -> int:
-        if not CONSOLE.is_terminal:
-            return process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
-
-        deadline = time.monotonic() + DEFAULT_AGENT_TIMEOUT
-        with Live(
-            Text(f"➜ agent pid {process.pid} · running · 0s"),
-            console=CONSOLE,
-            refresh_per_second=2,
-            transient=True,
-        ) as live:
-            while True:
-                remaining = max(0, deadline - time.monotonic())
-                elapsed = DEFAULT_AGENT_TIMEOUT - remaining
-                live.update(
-                    Text(
-                        f"➜ agent pid {process.pid} · running · "
-                        f"{elapsed:.0f}s"
-                    )
-                )
-                if remaining <= 0:
-                    self._kill_process_group(process)
-                    self._last_timed_out = True
-                    return 124
-                try:
-                    return process.wait(timeout=min(1, remaining))
-                except subprocess.TimeoutExpired:
-                    continue
+        # Codex owns the terminal while it is running. A parent-side Rich
+        # Live renderer would compete with Codex's own interactive redraws.
+        return process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
 
     @staticmethod
     def _kill_process_group(process: subprocess.Popen) -> None:
