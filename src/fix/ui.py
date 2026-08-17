@@ -28,7 +28,7 @@ class FixHighlighter(RegexHighlighter):
     base_style = "fix."
     highlights = [
         r"(?P<pass>\bpass(?:ed)?\b)",
-        r"(?P<fail>\bfail(?:ed|ure|ures)?\b|\berror\b|\bconflict(?:s|ing)?\b)",
+        r"(?P<fail>\bfail(?:ed|ure|ures)?\b|\berror\b)",
         r"(?P<wait>\bwait(?:ing|s)?\b|\bpending\b|\bunknown\b)",
         r"(?P<action>\b(?:Checking|Launching|Polling|Ready|Stopping|Watching)\b)",
     ]

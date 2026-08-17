@@ -10,6 +10,7 @@ from unittest import mock
 
 import fix
 from rich.console import Console
+from rich.text import Text
 from fix import (
     AgentLauncher,
     Check,
@@ -50,6 +51,15 @@ class LoggingTests(unittest.TestCase):
             configuration["handlers"][0]._log_render.time_format,
             "[%X]",
         )
+
+    def test_conflict_explanations_do_not_look_like_failures(self):
+        rendered = fix.FixHighlighter()(
+            Text("Mergeable .. pass (no conflicts vs main)")
+        )
+
+        styles = {span.style for span in rendered.spans}
+        self.assertIn("fix.pass", styles)
+        self.assertNotIn("fix.fail", styles)
 
 
 class UiTests(unittest.TestCase):
