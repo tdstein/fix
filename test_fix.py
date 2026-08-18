@@ -386,6 +386,59 @@ class RunTests(unittest.TestCase):
             output,
         )
 
+    def test_run_force_syncs_green_clean_pr_before_monitoring(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            mergeable="MERGEABLE",
+            merge_state_status="CLEAN",
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="",
+            completed_at="",
+            description="",
+        )
+        github = mock.Mock()
+        github.get_pull_request.return_value = pull_request
+        github.get_checks.return_value = [passed_check]
+        monitor = mock.Mock()
+        monitor.poll_once.return_value = True
+        monitor.last_pull_request = pull_request
+        monitor.poll_count = 1
+        monitor.agents_launched = 0
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+
+        with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+            with mock.patch("fix.configure_logging"), \
+                mock.patch("fix.GitHubClient", return_value=github), \
+                mock.patch("fix.default_state_path", return_value=Path("/tmp/state.json")), \
+                mock.patch("fix.StateStore"), \
+                mock.patch("fix.AgentLauncher"), \
+                mock.patch("fix.Monitor", return_value=monitor) as monitor_factory, \
+                mock.patch(
+                    "fix.synchronize_pull_request",
+                    return_value=pull_request,
+                ) as synchronize, \
+                mock.patch("fix.state_lock", return_value=lock):
+                self.assertEqual(fix.run(force_sync=True), 0)
+
+        synchronize.assert_called_once()
+        monitor_factory.assert_called_once()
+        self.assertIn("forced by --force-sync", "\n".join(logs.output))
+
     def test_run_enters_monitor_for_green_pr_with_new_review(self):
         pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -721,6 +774,10 @@ class ConfigurationTests(unittest.TestCase):
     def test_verbose_flag_is_parsed(self):
         self.assertTrue(fix.parse_args(["--verbose"]).verbose)
 
+    def test_force_sync_flag_is_parsed(self):
+        self.assertTrue(fix.parse_args(["--force-sync"]).force_sync)
+        self.assertTrue(fix.parse_args(["--sync"]).force_sync)
+
     def test_main_passes_verbose_to_run(self):
         with mock.patch("fix.run", return_value=0) as run:
             self.assertEqual(fix.main(["--verbose"]), 0)
@@ -729,6 +786,16 @@ class ConfigurationTests(unittest.TestCase):
             model=fix.DEFAULT_AGENT_MODEL,
             effort=fix.DEFAULT_AGENT_EFFORT,
             verbose=True,
+        )
+
+    def test_main_passes_force_sync_to_run(self):
+        with mock.patch("fix.run", return_value=0) as run:
+            self.assertEqual(fix.main(["--force-sync"]), 0)
+
+        run.assert_called_once_with(
+            model=fix.DEFAULT_AGENT_MODEL,
+            effort=fix.DEFAULT_AGENT_EFFORT,
+            force_sync=True,
         )
 
     def test_main_passes_model_and_effort_to_run(self):

@@ -78,6 +78,10 @@ fix --model openai.gpt-5.6-luna --effort max
 Use `--verbose` to show the full monitor configuration panel instead of the
 compact one-line header.
 
+Use `--force-sync` (or `--sync`) to force the pull request branch to be updated
+from its configured base branch through GitHub before monitoring starts. The
+checkout must still be clean and at the current pull request head.
+
 The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
 precedence over environment variables; without either, `fix` uses
 `openai.gpt-5.6-luna` and `max`.

@@ -126,6 +126,7 @@ def run(
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
+    force_sync: bool = False,
 ) -> int:
     """Run the monitor using the package-level compatibility hooks."""
 
@@ -133,6 +134,7 @@ def run(
         model=model,
         effort=effort,
         verbose=verbose,
+        force_sync=force_sync,
         dependencies=RunDependencies(
             configure_logging=configure_logging,
             command_runner_factory=CommandRunner,
@@ -162,6 +164,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         if args.verbose:
             run_kwargs["verbose"] = True
+        if args.force_sync:
+            run_kwargs["force_sync"] = True
         return run(**run_kwargs)
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user.")

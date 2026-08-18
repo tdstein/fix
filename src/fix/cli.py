@@ -208,6 +208,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Show the full monitor configuration panel.",
     )
+    parser.add_argument(
+        "--force-sync",
+        "--sync",
+        dest="force_sync",
+        action="store_true",
+        help=(
+            "Force synchronization with the pull request base branch "
+            "before monitoring."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -251,6 +261,7 @@ def run(
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
+    force_sync: bool = False,
     dependencies: Optional[RunDependencies] = None,
 ) -> int:
     deps = dependencies or _default_dependencies()
@@ -305,7 +316,8 @@ def run(
             )
             initial_check_snapshot = startup_status.check_snapshot
             if (
-                startup_status.ci_is_green
+                not force_sync
+                and startup_status.ci_is_green
                 and not startup_status.has_merge_conflicts
                 and startup_status.mergeability_is_known
             ):
@@ -329,8 +341,11 @@ def run(
                         agent_launcher=agent_launcher,
                     )
                     return 0
-            deps.log_startup_decision(startup_status)
-            if startup_status.should_synchronize:
+            if force_sync:
+                LOGGER.info("➜ synchronizing · forced by --force-sync")
+            else:
+                deps.log_startup_decision(startup_status)
+            if force_sync or startup_status.should_synchronize:
                 LOGGER.info(
                     "➜ synchronizing PR #%d with base branch `%s`.",
                     initial_pull_request.number,
