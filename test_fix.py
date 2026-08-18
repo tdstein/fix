@@ -375,7 +375,7 @@ class RunTests(unittest.TestCase):
         monitor_factory.assert_not_called()
         output = "\n".join(logs.output)
         self.assertIn("Watching example-org/example-repo#123 @ abc123.", output)
-        self.assertIn("⟳ poll every 5m · agent timeout 2h", output)
+        self.assertIn("⟳ poll every 1m · agent timeout 2h", output)
         self.assertIn("Startup checks", output)
         self.assertIn("✓ CI          1/1 passed", output)
         self.assertIn("✓ Mergeable   no conflicts vs main", output)
@@ -741,6 +741,9 @@ class AgentCommandTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_default_polling_interval_is_one_minute(self):
+        self.assertEqual(fix.DEFAULT_INTERVAL, 60)
+
     def test_environment_variables_override_defaults(self):
         with mock.patch.dict(
             "os.environ",

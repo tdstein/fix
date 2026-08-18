@@ -86,7 +86,7 @@ The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
 precedence over environment variables; without either, `fix` uses
 `openai.gpt-5.6-luna` and `max`.
 
-`fix` polls every five minutes. After synchronization advances the pull
+`fix` polls every minute. After synchronization advances the pull
 request head, it waits for the next poll so GitHub can recognize the new
 commit and start its checks. It also performs one immediate follow-up poll
 whenever a repair or review agent exits. It stops when the pull request closes
