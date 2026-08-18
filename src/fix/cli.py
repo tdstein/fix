@@ -12,7 +12,13 @@ from rich.live import Live
 from rich.text import Text
 
 from .agents import AgentLauncher, synchronize_with_conflict_resolution
-from .checks import find_new_reviews, inspect_startup, log_startup_decision
+from .checks import (
+    fetch_review_threads,
+    find_new_review_threads,
+    find_new_reviews,
+    inspect_startup,
+    log_startup_decision,
+)
 from .constants import (
     AGENT_EFFORT_ENV,
     AGENT_MODEL_ENV,
@@ -327,7 +333,15 @@ def run(
                     pull_request=initial_pull_request,
                     seen_reviews=state.get("seen_reviews", {}),
                 )
-                if not new_reviews:
+                new_comments = find_new_review_threads(
+                    threads=fetch_review_threads(
+                        github=github,
+                        pull_request=initial_pull_request,
+                    ),
+                    pull_request=initial_pull_request,
+                    seen_threads=state.get("seen_comments", {}),
+                )
+                if not new_reviews and not new_comments:
                     elapsed = time.monotonic() - started_at
                     log_monitor_completion(
                         stop_reason=(

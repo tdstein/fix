@@ -7,17 +7,23 @@ from typing import Any, Callable, Optional, Sequence
 
 from .agents import (
     build_agent_prompt,
+    build_review_comment_prompt,
     build_review_prompt,
     synchronize_with_conflict_resolution,
 )
-from .checks import find_new_reviews, format_ci_check
+from .checks import (
+    fetch_review_threads,
+    find_new_review_threads,
+    find_new_reviews,
+    format_ci_check,
+)
 from .constants import (
     DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD,
     LOGGER,
 )
 from .errors import ChecksNotReportedError, MonitorError
 from .github import CommandRunner, GitHubClient
-from .models import Check, CheckSnapshot, PullRequest, Review
+from .models import Check, CheckSnapshot, PullRequest, Review, ReviewThread
 from .repository import validate_agent_checkout
 from .state import StateStore, timestamp
 
@@ -224,6 +230,26 @@ class Monitor:
         self._last_check_line = check_line
 
         if not failures:
+            review_threads = fetch_review_threads(
+                github=self.github,
+                pull_request=pull_request,
+            )
+            seen_comments = state.setdefault("seen_comments", {})
+            new_comments = find_new_review_threads(
+                threads=review_threads,
+                pull_request=pull_request,
+                seen_threads=seen_comments,
+            )
+
+            if new_comments:
+                self._set_status("unresolved comments")
+                return self._launch_comment_agent(
+                    pull_request=pull_request,
+                    new_comments=new_comments,
+                    state=state,
+                    seen_comments=seen_comments,
+                )
+
             reviews = self.github.get_reviews(pull_request)
             seen_reviews = state.setdefault("seen_reviews", {})
             new_reviews = find_new_reviews(
@@ -344,6 +370,82 @@ class Monitor:
         self._prune_seen_items(seen_failures)
         self.state_store.save(state)
         self._log_agent_result(agent_kind="repair", returncode=returncode)
+        return False
+
+    def _launch_comment_agent(
+        self,
+        *,
+        pull_request: PullRequest,
+        new_comments: Sequence[tuple[str, ReviewThread]],
+        state: dict[str, Any],
+        seen_comments: dict[str, Any],
+    ) -> bool:
+        try:
+            self._validate_agent_checkout(
+                runner=self.runner,
+                workdir=self.workdir,
+                pull_request=pull_request,
+            )
+        except MonitorError as error:
+            self.state_store.save(state)
+            LOGGER.error("%s", error)
+            return False
+
+        log_path = (
+            self.state_store.path.parent
+            / "logs"
+            / f"{timestamp().replace(':', '').replace('+00:00', 'Z')}"
+            f"-{pull_request.head_sha[:12]}-comments-{len(seen_comments) + 1}.log"
+        )
+        prompt = build_review_comment_prompt(
+            pull_request,
+            new_comments,
+            workdir=self.workdir,
+        )
+        self.agents_launched += 1
+        self._log_agent_launch(
+            agent_kind="comment",
+            details=(
+                f"{len(new_comments)} unresolved comment"
+                f"{'' if len(new_comments) == 1 else 's'}"
+            ),
+            log_path=log_path,
+        )
+        for _, thread in new_comments:
+            location = thread.path or "unknown file"
+            if thread.line is not None:
+                location += f":{thread.line}"
+            latest_comment = thread.latest_comment
+            body = textwrap.shorten(
+                " ".join((latest_comment.body if latest_comment else "").split())
+                or "(no comment body)",
+                width=180,
+                placeholder="...",
+            )
+            LOGGER.info(
+                "  comment @%s %s: %s",
+                thread.author_login or "unknown",
+                location,
+                body,
+            )
+        returncode = self.agent_launcher.launch(prompt, log_path)
+        self.poll_again_immediately = True
+
+        if (
+            self._verify_agent_result(
+                pull_request=pull_request,
+                state=state,
+                agent_kind="comment",
+            )
+            is None
+        ):
+            return False
+
+        for key, _ in new_comments:
+            seen_comments[key] = {"seen_at": timestamp()}
+        self._prune_seen_items(seen_comments)
+        self.state_store.save(state)
+        self._log_agent_result(agent_kind="comment", returncode=returncode)
         return False
 
     def _launch_review_agent(

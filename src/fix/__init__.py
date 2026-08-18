@@ -16,6 +16,7 @@ from .agents import (
     build_agent_command,
     build_agent_prompt,
     build_conflict_prompt,
+    build_review_comment_prompt,
     build_review_prompt,
     launch_conflict_agent,
 )
@@ -23,8 +24,12 @@ from .agents import (
     synchronize_with_conflict_resolution as _synchronize_with_conflict_resolution,
 )
 from .checks import (
+    fetch_review_threads,
     format_ci_check,
     format_mergeability,
+    find_new_comments,
+    find_new_review_threads,
+    find_new_reviews,
     inspect_startup,
     log_startup_decision,
     should_synchronize_pull_request,
@@ -52,12 +57,21 @@ from .constants import (
     PASS_BUCKETS,
     PASS_STATES,
     REVIEW_KEY_VERSION,
+    REVIEW_THREAD_KEY_VERSION,
     STATE_VERSION,
     SUBMITTED_REVIEW_STATES,
 )
 from .errors import ChecksNotReportedError, CommandError, MonitorError
 from .github import CommandRunner, GitHubClient
-from .models import Check, CheckSnapshot, PullRequest, Review, StartupStatus
+from .models import (
+    Check,
+    CheckSnapshot,
+    PullRequest,
+    Review,
+    ReviewComment,
+    ReviewThread,
+    StartupStatus,
+)
 from .monitor import Monitor as _Monitor
 from .repository import (
     is_update_branch_conflict,
@@ -204,7 +218,10 @@ __all__ = [
     "PASS_STATES",
     "PullRequest",
     "REVIEW_KEY_VERSION",
+    "REVIEW_THREAD_KEY_VERSION",
     "Review",
+    "ReviewComment",
+    "ReviewThread",
     "STATE_VERSION",
     "SUBMITTED_REVIEW_STATES",
     "StartupStatus",
@@ -212,12 +229,17 @@ __all__ = [
     "build_agent_command",
     "build_agent_prompt",
     "build_conflict_prompt",
+    "build_review_comment_prompt",
     "build_review_prompt",
     "build_monitor_header",
     "configure_logging",
     "default_state_path",
+    "fetch_review_threads",
     "format_ci_check",
     "format_mergeability",
+    "find_new_comments",
+    "find_new_review_threads",
+    "find_new_reviews",
     "inspect_startup",
     "is_update_branch_conflict",
     "is_update_branch_workflow_scope_error",

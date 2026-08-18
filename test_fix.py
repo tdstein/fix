@@ -18,10 +18,13 @@ from fix import (
     Monitor,
     PullRequest,
     Review,
+    ReviewComment,
+    ReviewThread,
     StateStore,
     build_agent_command,
     build_agent_prompt,
     build_conflict_prompt,
+    build_review_comment_prompt,
     build_review_prompt,
     default_state_path,
     synchronize_pull_request,
@@ -250,6 +253,92 @@ class ReviewTests(unittest.TestCase):
         )
 
         self.assertFalse(review.is_from_other(self.pull_request))
+
+
+class ReviewThreadTests(unittest.TestCase):
+    def setUp(self):
+        self.pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            author_login="contributor",
+        )
+
+    def test_thread_parses_comments_and_tracks_replies(self):
+        thread = ReviewThread.from_json(
+            {
+                "id": "thread-1",
+                "isResolved": False,
+                "isOutdated": True,
+                "path": "src/app.py",
+                "line": 42,
+                "comments": {
+                    "nodes": [
+                        {
+                            "id": "comment-1",
+                            "author": {"login": "maintainer"},
+                            "body": "Handle this edge case.",
+                            "createdAt": "2026-08-14T12:00:00Z",
+                            "commit": {"oid": "abc123"},
+                            "url": "https://example.test/comment-1",
+                        },
+                        {
+                            "id": "comment-2",
+                            "author": {"login": "contributor"},
+                            "body": "I will fix it.",
+                            "createdAt": "2026-08-14T12:01:00Z",
+                            "replyTo": {"id": "comment-1"},
+                        },
+                    ]
+                },
+            }
+        )
+
+        self.assertTrue(thread.is_unresolved)
+        self.assertTrue(thread.is_outdated)
+        self.assertEqual(thread.author_login, "maintainer")
+        self.assertEqual(thread.latest_comment.reply_to_id, "comment-1")
+        self.assertTrue(thread.is_from_other(self.pull_request))
+        self.assertEqual(thread.review_thread_key(), thread.thread_key())
+        self.assertEqual(
+            thread.review_thread_key(),
+            dataclasses.replace(thread, is_outdated=False).review_thread_key(),
+        )
+
+    def test_new_thread_filter_ignores_resolved_and_own_threads(self):
+        comment = ReviewComment(
+            id="comment-1",
+            author_login="maintainer",
+            body="Please handle this.",
+        )
+        unresolved = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            comments=(comment,),
+        )
+        resolved = dataclasses.replace(unresolved, id="thread-2", is_resolved=True)
+        own = dataclasses.replace(
+            unresolved,
+            id="thread-3",
+            author_login="contributor",
+            comments=(
+                dataclasses.replace(comment, author_login="contributor"),
+            ),
+        )
+
+        found = fix.find_new_comments(
+            comments=[unresolved, resolved, own],
+            pull_request=self.pull_request,
+            seen_comments={},
+        )
+
+        self.assertEqual([thread.id for _, thread in found], ["thread-1"])
 
 
 class StateStoreTests(unittest.TestCase):
@@ -995,6 +1084,53 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIn("Keep this Codex session interactive", prompt)
 
 
+class ReviewCommentPromptTests(unittest.TestCase):
+    def test_prompt_contains_thread_context_and_resolution_rules(self):
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="https://github.com/example-org/example-repo/pull/123",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            author_login="contributor",
+        )
+        thread = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            path="src/app.py",
+            line=42,
+            comments=(
+                ReviewComment(
+                    id="comment-1",
+                    author_login="maintainer",
+                    body="Handle this edge case.",
+                    commit_sha="abc123",
+                ),
+            ),
+        )
+
+        prompt = build_review_comment_prompt(
+            pull_request,
+            [("thread-key", thread)],
+            workdir=Path("/tmp/example-repo"),
+        )
+
+        self.assertIn("Handle this edge case.", prompt)
+        self.assertIn("thread-key", prompt)
+        self.assertIn("thread-1", prompt)
+        self.assertIn("src/app.py:42", prompt)
+        self.assertIn("resolveReviewThread", prompt)
+        self.assertIn("Do not resolve a thread merely because it was read.", prompt)
+        self.assertIn("Iterate through every listed comment individually", prompt)
+        self.assertIn("reply to the comment", prompt)
+        self.assertIn("create a GitHub issue", prompt)
+        self.assertIn("implement the requested change", prompt)
+
+
 class GitHubClientTests(unittest.TestCase):
     def test_current_branch_without_pull_request_returns_none(self):
         class Runner:
@@ -1119,6 +1255,94 @@ class GitHubClientTests(unittest.TestCase):
         self.assertEqual(len(reviews), 1)
         self.assertEqual(reviews[0].body, "Looks good.")
 
+    def test_review_threads_are_loaded_from_graphql(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, command, *, cwd=None):
+                self.calls.append((command, cwd))
+                if command[:3] == ["gh", "repo", "view"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "example-org/example-repo\n",
+                        "",
+                    )
+                if command[:3] == ["gh", "api", "graphql"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        json.dumps(
+                            [
+                                {
+                                    "data": {
+                                        "repository": {
+                                            "pullRequest": {
+                                                "reviewThreads": {
+                                                    "nodes": [
+                                                        {
+                                                            "id": "thread-1",
+                                                            "isResolved": False,
+                                                            "isOutdated": False,
+                                                            "path": "src/app.py",
+                                                            "line": 42,
+                                                            "comments": {
+                                                                "nodes": [
+                                                                    {
+                                                                        "id": "comment-1",
+                                                                        "author": {
+                                                                            "login": "maintainer"
+                                                                        },
+                                                                        "body": "Handle this.",
+                                                                    }
+                                                                ]
+                                                            },
+                                                        }
+                                                    ],
+                                                    "pageInfo": {
+                                                        "hasNextPage": False,
+                                                        "endCursor": None,
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        ),
+                        "",
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        runner = Runner()
+        threads = GitHubClient(
+            cwd=Path("/tmp/example-repo"),
+            runner=runner,
+        ).get_review_threads(pull_request)
+
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0].id, "thread-1")
+        self.assertEqual(threads[0].comments[0].body, "Handle this.")
+        self.assertTrue(runner.calls[1][0][:5] == [
+            "gh",
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+        ])
+
     def test_unreported_checks_are_identified_as_transient(self):
         class Runner:
             def run(self, command, *, cwd=None):
@@ -1203,13 +1427,15 @@ class SynchronizeRunner:
 
 
 class FakeGitHub:
-    def __init__(self, pull_requests, checks, reviews=None):
+    def __init__(self, pull_requests, checks, reviews=None, review_threads=None):
         self.pull_requests = iter(pull_requests)
         self.last_pull_request = pull_requests[-1]
         self.checks = checks
         self.reviews = reviews or []
+        self.review_threads = review_threads or []
         self.check_calls = 0
         self.review_calls = 0
+        self.review_thread_calls = 0
         self.runner = FakeRunner(pull_requests[0].head_sha)
 
     def get_pull_request(self, target):
@@ -1227,6 +1453,10 @@ class FakeGitHub:
     def get_reviews(self, pull_request):
         self.review_calls += 1
         return self.reviews
+
+    def get_review_threads(self, pull_request):
+        self.review_thread_calls += 1
+        return self.review_threads
 
 
 class FakeAgent:
@@ -1459,6 +1689,63 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("━", output)
         self.assertIn("➜ Agent review", output)
         self.assertIn("review @maintainer: Please handle this edge case.", output)
+
+    def test_passed_ci_launches_agent_for_a_new_unresolved_comment(self):
+        thread = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            path="src/app.py",
+            line=42,
+            comments=(
+                ReviewComment(
+                    id="comment-1",
+                    author_login="maintainer",
+                    body="Handle this edge case.",
+                    commit_sha=self.pull_request.head_sha,
+                ),
+            ),
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [passed_check],
+                review_threads=[thread],
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            with self.assertLogs(fix.LOGGER, level="INFO") as logs:
+                self.assertFalse(monitor.poll_once())
+                self.assertTrue(monitor.poll_again_immediately)
+                self.assertTrue(monitor.poll_once())
+
+            self.assertEqual(len(agent.prompts), 1)
+            self.assertIn("Handle this edge case.", agent.prompts[0][0])
+            self.assertEqual(github.review_thread_calls, 2)
+            self.assertEqual(len(state_store.load()["seen_comments"]), 1)
+
+        output = "\n".join(logs.output)
+        self.assertIn("➜ Agent comment", output)
+        self.assertIn("comment @maintainer src/app.py:42", output)
 
     def test_waiting_ci_also_checks_for_reviews(self):
         review = Review(

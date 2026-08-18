@@ -1,8 +1,8 @@
 # fix
 
 `fix` watches a GitHub pull request and launches one interactive Codex session
-for each new CI failure or review from someone other than the pull request
-author.
+for each new CI failure, review, or unresolved inline review comment from
+someone other than the pull request author.
 
 It is intended for a clean local checkout of the pull request branch. The
 monitor can update the branch from its configured base branch, launch Codex to
@@ -89,11 +89,13 @@ precedence over environment variables; without either, `fix` uses
 `fix` polls every minute. After synchronization advances the pull
 request head, it waits for the next poll so GitHub can recognize the new
 commit and start its checks. It also performs one immediate follow-up poll
-whenever a repair or review agent exits. It stops when the pull request closes
-or when all checks pass without a new review. When checks are waiting or have
-no failures, it also checks pull request reviews. A review session summarizes
-feedback with you, applies small clearly correct fixes, and pauses for your
-judgment on subjective changes.
+whenever a repair, review, or comment agent exits. It stops when the pull
+request closes or when all checks pass without new review feedback. When
+checks are waiting or have no failures, it checks pull request reviews and
+unresolved inline review threads. Review and comment sessions summarize
+feedback with you, apply small clearly correct fixes, and pause for your
+judgment on subjective changes. A comment session can resolve a thread after
+its concern has been addressed.
 
 In an interactive terminal, `fix` shows a compact monitor summary and
 color-coded check and agent statuses. Piped output remains plain and
@@ -111,13 +113,15 @@ request.
 
 State is stored under `$XDG_STATE_HOME/fix/`,
 `$XDG_CACHE_HOME/fix/`, or `~/.cache/fix/`, using one JSON file per pull
-request. Agent session logs are stored in the same directory under `logs/`.
+request. The state records handled CI failures, reviews, and inline comment
+threads. Agent session logs are stored in the same directory under `logs/`.
 
 ## Security considerations
 
-Run `fix` only in repositories and worktrees you trust. The repair and review
-agents receive repository contents and diagnostic output, run with Codex
-approval enabled and network access enabled, and may commit and push changes.
+Run `fix` only in repositories and worktrees you trust. The repair, review, and
+comment agents receive repository contents and diagnostic output, run with
+Codex approval enabled and network access enabled, and may commit, push, and
+resolve review threads.
 Review the generated diff and the session logs when investigating unexpected
 behavior. Do not run it with credentials or repositories that the agent should
 not be able to access.

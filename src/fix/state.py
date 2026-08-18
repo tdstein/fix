@@ -38,6 +38,7 @@ class StateStore:
                 "version": STATE_VERSION,
                 "seen_failures": {},
                 "seen_reviews": {},
+                "seen_comments": {},
                 "agent_attempts_by_head": {},
             }
 

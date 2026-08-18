@@ -5,7 +5,14 @@ from typing import Any, Mapping, Sequence
 from .constants import LOGGER
 from .errors import ChecksNotReportedError
 from .github import GitHubClient
-from .models import Check, CheckSnapshot, PullRequest, Review, StartupStatus
+from .models import (
+    Check,
+    CheckSnapshot,
+    PullRequest,
+    Review,
+    ReviewThread,
+    StartupStatus,
+)
 
 
 STATUS_GLYPHS = {
@@ -91,6 +98,57 @@ def find_new_reviews(
     ]
 
 
+def fetch_review_threads(
+    *,
+    github: GitHubClient,
+    pull_request: PullRequest,
+) -> list[ReviewThread]:
+    """Fetch review threads while tolerating lightweight test doubles."""
+
+    getter = getattr(github, "get_review_threads", None)
+    if not callable(getter):
+        return []
+    values = getter(pull_request)
+    if isinstance(values, list):
+        return values
+    if isinstance(values, tuple):
+        return list(values)
+    return []
+
+
+def find_new_review_threads(
+    *,
+    threads: Sequence[ReviewThread],
+    pull_request: PullRequest,
+    seen_threads: Mapping[str, Any],
+) -> list[tuple[str, ReviewThread]]:
+    unresolved_threads = [
+        thread
+        for thread in threads
+        if thread.is_unresolved and thread.is_from_other(pull_request)
+    ]
+    return [
+        (thread.review_thread_key(), thread)
+        for thread in unresolved_threads
+        if thread.review_thread_key() not in seen_threads
+    ]
+
+
+def find_new_comments(
+    *,
+    comments: Sequence[ReviewThread],
+    pull_request: PullRequest,
+    seen_comments: Mapping[str, Any],
+) -> list[tuple[str, ReviewThread]]:
+    """Compatibility name for callers that refer to review threads as comments."""
+
+    return find_new_review_threads(
+        threads=comments,
+        pull_request=pull_request,
+        seen_threads=seen_comments,
+    )
+
+
 def inspect_startup(
     *,
     github: GitHubClient,
@@ -152,7 +210,7 @@ def log_startup_decision(status: StartupStatus) -> None:
         )
     elif status.ci_is_green and status.mergeability_is_known:
         LOGGER.info(
-            "⟳ monitoring · waiting for review changes",
+            "⟳ monitoring · waiting for review feedback",
         )
     else:
         LOGGER.info(

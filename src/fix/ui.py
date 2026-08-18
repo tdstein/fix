@@ -129,7 +129,9 @@ def build_monitor_header(
     )
     table.add_row(
         _value("Exit"),
-        _value("when checks are complete and no new reviews need attention"),
+        _value(
+            "when checks are complete and no new review feedback needs attention"
+        ),
     )
     return Panel(
         table,
