@@ -30,9 +30,14 @@ from .constants import (
     LOGGER,
 )
 from .errors import MonitorError
-from .github import CommandRunner, GitHubClient
+from .github import (
+    CommandRunner,
+    GitHubClient,
+    repository_from_pull_request_url,
+)
 from .monitor import Monitor
 from .models import PullRequest
+from .repository import ensure_pull_request_branch
 from .state import StateStore, default_state_path, state_lock
 from .ui import (
     CONSOLE,
@@ -225,6 +230,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             "before monitoring."
         ),
     )
+    parser.add_argument(
+        "pull_request_url",
+        nargs="?",
+        help="GitHub pull request URL to monitor.",
+    )
     return parser.parse_args(argv)
 
 
@@ -269,6 +279,7 @@ def run(
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
     force_sync: bool = False,
+    pull_request_url: Optional[str] = None,
     dependencies: Optional[RunDependencies] = None,
 ) -> int:
     deps = dependencies or _default_dependencies()
@@ -277,9 +288,38 @@ def run(
     workdir = Path.cwd().resolve()
     runner = deps.command_runner_factory()
     github = deps.github_client_factory(cwd=workdir, runner=runner)
-    initial_pull_request = github.get_pull_request()
+    if pull_request_url is None:
+        initial_pull_request = github.get_pull_request()
+    else:
+        pull_request_repo = repository_from_pull_request_url(pull_request_url)
+        current_repo = github.resolve_repo()
+        if current_repo.casefold() != pull_request_repo.casefold():
+            raise MonitorError(
+                f"The current repository is {current_repo}, but pull request "
+                f"{pull_request_url} belongs to {pull_request_repo}. "
+                f"Run fix from a checkout of {pull_request_repo}."
+            )
+        initial_pull_request = github.get_pull_request(pull_request_url)
+        if initial_pull_request is not None:
+            if ensure_pull_request_branch(
+                runner=runner,
+                workdir=workdir,
+                pull_request=initial_pull_request,
+            ):
+                LOGGER.info(
+                    "➜ switched to pull request branch `%s`.",
+                    initial_pull_request.head_branch,
+                )
     if initial_pull_request is None:
-        LOGGER.info("No pull request found for the current branch; nothing to fix.")
+        if pull_request_url is None:
+            LOGGER.info(
+                "No pull request found for the current branch; nothing to fix."
+            )
+        else:
+            LOGGER.info(
+                "No pull request found at %s; nothing to fix.",
+                pull_request_url,
+            )
         return 0
     target = str(initial_pull_request.number)
     state_path = deps.default_state_path(

@@ -478,6 +478,70 @@ class RunTests(unittest.TestCase):
         state_store.assert_not_called()
         agent_launcher.assert_not_called()
 
+    def test_run_resolves_a_pull_request_url_and_prepares_its_branch(self):
+        pull_request_url = (
+            "https://github.com/example-org/example-repo/pull/123"
+        )
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url=pull_request_url,
+            state="CLOSED",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+        github = mock.Mock()
+        github.resolve_repo.return_value = "example-org/example-repo"
+        github.get_pull_request.return_value = pull_request
+        monitor = mock.Mock()
+        monitor.poll_once.return_value = True
+        monitor.last_pull_request = pull_request
+        monitor.poll_count = 1
+        monitor.agents_launched = 0
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lock
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github), \
+            mock.patch("fix.StateStore"), \
+            mock.patch("fix.AgentLauncher"), \
+            mock.patch("fix.Monitor", return_value=monitor), \
+            mock.patch("fix.state_lock", return_value=lock), \
+            mock.patch(
+                "fix.cli.ensure_pull_request_branch",
+                return_value=True,
+            ) as ensure_branch:
+            self.assertEqual(
+                fix.run(pull_request_url=pull_request_url),
+                0,
+            )
+
+        github.get_pull_request.assert_called_once_with(pull_request_url)
+        ensure_branch.assert_called_once()
+        self.assertEqual(
+            ensure_branch.call_args.kwargs["pull_request"],
+            pull_request,
+        )
+
+    def test_run_refuses_a_pull_request_from_another_repository(self):
+        pull_request_url = (
+            "https://github.com/example-org/example-repo/pull/123"
+        )
+        github = mock.Mock()
+        github.resolve_repo.return_value = "other-org/other-repo"
+
+        with mock.patch("fix.configure_logging"), \
+            mock.patch("fix.GitHubClient", return_value=github):
+            with self.assertRaises(fix.MonitorError) as context:
+                fix.run(pull_request_url=pull_request_url)
+
+        self.assertIn("current repository is other-org/other-repo", str(context.exception))
+        self.assertIn("example-org/example-repo", str(context.exception))
+        github.get_pull_request.assert_not_called()
+
     def test_run_constructs_state_store_with_only_its_path(self):
         pull_request = PullRequest(
             repo="example-org/example-repo",
@@ -963,6 +1027,15 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(fix.parse_args(["--force-sync"]).force_sync)
         self.assertTrue(fix.parse_args(["--sync"]).force_sync)
 
+    def test_pull_request_url_is_parsed(self):
+        url = "https://github.com/example-org/example-repo/pull/123"
+
+        self.assertEqual(fix.parse_args([url]).pull_request_url, url)
+        self.assertEqual(
+            fix.repository_from_pull_request_url(url),
+            "example-org/example-repo",
+        )
+
     def test_main_passes_verbose_to_run(self):
         with mock.patch("fix.run", return_value=0) as run:
             self.assertEqual(fix.main(["--verbose"]), 0)
@@ -992,12 +1065,94 @@ class ConfigurationTests(unittest.TestCase):
 
         run.assert_called_once_with(model="flag-model", effort="high")
 
+    def test_main_passes_pull_request_url_to_run(self):
+        url = "https://github.com/example-org/example-repo/pull/123"
+
+        with mock.patch("fix.run", return_value=0) as run:
+            self.assertEqual(fix.main([url]), 0)
+
+        run.assert_called_once_with(
+            model=fix.DEFAULT_AGENT_MODEL,
+            effort=fix.DEFAULT_AGENT_EFFORT,
+            pull_request_url=url,
+        )
+
     def test_main_reports_unexpected_errors(self):
         with mock.patch("fix.run", side_effect=RuntimeError("boom")):
             with self.assertLogs(fix.LOGGER, level="ERROR") as logs:
                 self.assertEqual(fix.main([]), 1)
 
         self.assertIn("Unexpected error while monitoring.", logs.output[0])
+
+
+class PullRequestBranchTests(unittest.TestCase):
+    def setUp(self):
+        self.pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="https://github.com/example-org/example-repo/pull/123",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+        )
+
+    def test_checks_out_pull_request_when_branch_is_wrong(self):
+        class Runner:
+            def __init__(self):
+                self.branch = "main"
+                self.calls = []
+
+            def run(self, command, *, cwd=None):
+                self.calls.append((command, cwd))
+                if command == ["git", "branch", "--show-current"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        f"{self.branch}\n",
+                        "",
+                    )
+                if command == ["gh", "pr", "checkout", "123"]:
+                    self.branch = "fix-ci"
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                raise AssertionError(f"unexpected command: {command}")
+
+        runner = Runner()
+        changed = fix.ensure_pull_request_branch(
+            runner=runner,
+            workdir=Path("/tmp/example-repo"),
+            pull_request=self.pull_request,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [command for command, _ in runner.calls],
+            [
+                ["git", "branch", "--show-current"],
+                ["gh", "pr", "checkout", "123"],
+                ["git", "branch", "--show-current"],
+            ],
+        )
+
+    def test_does_not_checkout_when_already_on_pull_request_branch(self):
+        class Runner:
+            def run(self, command, *, cwd=None):
+                self.assert_command(command)
+                return subprocess.CompletedProcess(command, 0, "fix-ci\n", "")
+
+            def assert_command(self, command):
+                if command != ["git", "branch", "--show-current"]:
+                    raise AssertionError(f"unexpected command: {command}")
+
+        changed = fix.ensure_pull_request_branch(
+            runner=Runner(),
+            workdir=Path("/tmp/example-repo"),
+            pull_request=self.pull_request,
+        )
+
+        self.assertFalse(changed)
 
 
 class AgentLauncherTests(unittest.TestCase):

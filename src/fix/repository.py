@@ -19,6 +19,45 @@ def local_git_value(
     return result.stdout.strip()
 
 
+def ensure_pull_request_branch(
+    *,
+    runner: CommandRunner,
+    workdir: Path,
+    pull_request: PullRequest,
+) -> bool:
+    """Ensure the checkout is on the pull request head branch."""
+
+    current_branch = local_git_value(
+        runner,
+        workdir,
+        ["branch", "--show-current"],
+    )
+    if current_branch == pull_request.head_branch:
+        return False
+
+    checkout_command = ["gh", "pr", "checkout", str(pull_request.number)]
+    result = runner.run(checkout_command, cwd=workdir)
+    if result.returncode != 0:
+        raise CommandError(
+            checkout_command,
+            result.returncode,
+            result.stderr,
+        )
+
+    checked_out_branch = local_git_value(
+        runner,
+        workdir,
+        ["branch", "--show-current"],
+    )
+    if checked_out_branch != pull_request.head_branch:
+        raise MonitorError(
+            "The pull request checkout did not switch to the expected branch "
+            f"{pull_request.head_branch!r}; current branch is "
+            f"{checked_out_branch or '(detached)'}."
+        )
+    return True
+
+
 def validate_agent_checkout(
     *,
     runner: CommandRunner,

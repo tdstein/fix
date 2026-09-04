@@ -70,6 +70,16 @@ fix
 
 The current directory and branch determine the pull request. The checkout
 must already be at the current pull request head, with no uncommitted changes.
+You can provide a pull request URL instead; `fix` verifies that the current
+directory is the pull request's repository and switches to its head branch
+with `gh pr checkout` when needed:
+
+```bash
+fix https://github.com/example-org/example-repo/pull/123
+```
+
+It exits with an error if the current directory is not a checkout of that
+repository.
 
 Choose the Codex model and reasoning effort with flags:
 

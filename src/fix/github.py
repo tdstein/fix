@@ -4,9 +4,34 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
+from urllib.parse import urlparse
 
 from .errors import ChecksNotReportedError, CommandError, MonitorError
 from .models import Check, PullRequest, Review, ReviewThread
+
+
+def repository_from_pull_request_url(url: str) -> str:
+    """Return the ``owner/name`` repository from a GitHub pull request URL."""
+
+    parsed = urlparse(url)
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or parsed.netloc.casefold() not in {"github.com", "www.github.com"}
+    ):
+        raise MonitorError(
+            f"Expected a GitHub pull request URL, got {url!r}."
+        )
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if (
+        len(parts) < 4
+        or parts[2].casefold() != "pull"
+        or not parts[3].isdigit()
+    ):
+        raise MonitorError(
+            f"Expected a GitHub pull request URL, got {url!r}."
+        )
+    return f"{parts[0]}/{parts[1]}"
 
 
 REVIEW_THREADS_QUERY = """

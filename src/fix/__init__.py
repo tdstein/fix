@@ -64,7 +64,11 @@ from .constants import (
     SUBMITTED_REVIEW_STATES,
 )
 from .errors import ChecksNotReportedError, CommandError, MonitorError
-from .github import CommandRunner, GitHubClient
+from .github import (
+    CommandRunner,
+    GitHubClient,
+    repository_from_pull_request_url,
+)
 from .models import (
     Check,
     CheckSnapshot,
@@ -76,6 +80,7 @@ from .models import (
 )
 from .monitor import Monitor as _Monitor
 from .repository import (
+    ensure_pull_request_branch,
     is_update_branch_conflict,
     is_update_branch_workflow_scope_error,
     local_git_value,
@@ -143,6 +148,7 @@ def run(
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
     force_sync: bool = False,
+    pull_request_url: Optional[str] = None,
 ) -> int:
     """Run the monitor using the package-level compatibility hooks."""
 
@@ -151,6 +157,7 @@ def run(
         effort=effort,
         verbose=verbose,
         force_sync=force_sync,
+        pull_request_url=pull_request_url,
         dependencies=RunDependencies(
             configure_logging=configure_logging,
             command_runner_factory=CommandRunner,
@@ -182,6 +189,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             run_kwargs["verbose"] = True
         if args.force_sync:
             run_kwargs["force_sync"] = True
+        if args.pull_request_url is not None:
+            run_kwargs["pull_request_url"] = args.pull_request_url
         return run(**run_kwargs)
     except KeyboardInterrupt:
         LOGGER.info("Stopped by user.")
@@ -254,6 +263,7 @@ __all__ = [
     "parse_args",
     "run",
     "render_monitor_header",
+    "repository_from_pull_request_url",
     "should_synchronize_pull_request",
     "sleep_until_next_poll",
     "state_lock",
@@ -261,5 +271,6 @@ __all__ = [
     "synchronize_pull_request",
     "synchronize_with_conflict_resolution",
     "timestamp",
+    "ensure_pull_request_branch",
     "validate_agent_checkout",
 ]
