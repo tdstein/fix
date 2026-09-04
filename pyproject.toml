@@ -1,7 +1,7 @@
 [project]
 name = "fix"
 version = "0.1.0"
-description = "Watch GitHub pull requests and launch Codex sessions for CI failures and reviews."
+description = "Watch GitHub pull requests and launch agent sessions for CI failures and reviews."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }

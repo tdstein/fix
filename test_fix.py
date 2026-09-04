@@ -985,15 +985,63 @@ class AgentCommandTests(unittest.TestCase):
         self.assertIn("openai.gpt-5.6", command)
         self.assertIn('model_reasoning_effort="high"', command)
 
+    def test_command_builds_claude_code_invocation(self):
+        workdir = Path("/tmp/example-repo")
+        command = build_agent_command(
+            workdir=workdir,
+            prompt="Fix the failure.",
+            agent="claude",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "--model",
+                fix.DEFAULT_CLAUDE_MODEL,
+                "--effort",
+                "max",
+                "--dangerously-skip-permissions",
+                "Fix the failure.",
+            ],
+        )
+
+    def test_claude_command_accepts_model_and_effort(self):
+        command = build_agent_command(
+            workdir=Path("/tmp/example-repo"),
+            prompt="Fix the failure.",
+            agent="claude",
+            model="opus",
+            effort="high",
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "claude",
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "--dangerously-skip-permissions",
+                "Fix the failure.",
+            ],
+        )
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_default_polling_interval_is_one_minute(self):
         self.assertEqual(fix.DEFAULT_INTERVAL, 60)
 
+    def test_default_agent_is_codex(self):
+        self.assertEqual(fix.DEFAULT_AGENT, "codex")
+        self.assertEqual(fix.parse_args([]).agent, "codex")
+
     def test_environment_variables_override_defaults(self):
         with mock.patch.dict(
             "os.environ",
             {
+                fix.AGENT_ENV: "claude",
                 fix.AGENT_MODEL_ENV: "openai.gpt-5.6",
                 fix.AGENT_EFFORT_ENV: "high",
             },
@@ -1001,6 +1049,7 @@ class ConfigurationTests(unittest.TestCase):
         ):
             args = fix.parse_args([])
 
+        self.assertEqual(args.agent, "claude")
         self.assertEqual(args.model, "openai.gpt-5.6")
         self.assertEqual(args.effort, "high")
 
@@ -1008,15 +1057,24 @@ class ConfigurationTests(unittest.TestCase):
         with mock.patch.dict(
             "os.environ",
             {
+                fix.AGENT_ENV: "codex",
                 fix.AGENT_MODEL_ENV: "environment-model",
                 fix.AGENT_EFFORT_ENV: "low",
             },
             clear=True,
         ):
             args = fix.parse_args(
-                ["--model", "flag-model", "--effort", "high"]
+                [
+                    "--agent",
+                    "claude",
+                    "--model",
+                    "flag-model",
+                    "--effort",
+                    "high",
+                ]
             )
 
+        self.assertEqual(args.agent, "claude")
         self.assertEqual(args.model, "flag-model")
         self.assertEqual(args.effort, "high")
 
@@ -1064,6 +1122,16 @@ class ConfigurationTests(unittest.TestCase):
             )
 
         run.assert_called_once_with(model="flag-model", effort="high")
+
+    def test_main_passes_selected_agent_to_run(self):
+        with mock.patch("fix.run", return_value=0) as run:
+            self.assertEqual(fix.main(["--agent", "claude"]), 0)
+
+        run.assert_called_once_with(
+            model=fix.DEFAULT_AGENT_MODEL,
+            effort=fix.DEFAULT_AGENT_EFFORT,
+            agent="claude",
+        )
 
     def test_main_passes_pull_request_url_to_run(self):
         url = "https://github.com/example-org/example-repo/pull/123"
@@ -1178,6 +1246,35 @@ class AgentLauncherTests(unittest.TestCase):
         )
         process.wait.assert_called_once_with(timeout=2 * 60 * 60)
 
+    @mock.patch("fix.subprocess.Popen")
+    def test_launches_claude_with_terminal_stdio(self, popen):
+        process = popen.return_value
+        process.pid = 123
+        process.wait.return_value = 0
+        workdir = Path("/tmp/example-repo")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "agent.log"
+            result = AgentLauncher(
+                workdir=workdir,
+                agent="claude",
+            ).launch(
+                "Fix the failure.",
+                log_path,
+            )
+
+        self.assertEqual(result, 0)
+        popen.assert_called_once_with(
+            build_agent_command(
+                workdir=workdir,
+                prompt="Fix the failure.",
+                agent="claude",
+            ),
+            cwd=str(workdir),
+            start_new_session=True,
+        )
+        process.wait.assert_called_once_with(timeout=2 * 60 * 60)
+
     @mock.patch("fix.os.killpg")
     @mock.patch("fix.subprocess.Popen")
     def test_timeout_kills_the_entire_agent_process_group(self, popen, killpg):
@@ -1269,7 +1366,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Never force-push", prompt)
         self.assertIn("flaky CI failure", prompt)
         self.assertIn("gh run rerun", prompt)
-        self.assertIn("exit Codex", prompt)
+        self.assertIn("exit the agent session", prompt)
         self.assertIn("original `fix` polling loop", prompt)
 
     def test_conflict_prompt_instructs_agent_to_resolve_and_push_safely(self):
@@ -1335,7 +1432,7 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIn("gh api user --jq .login", prompt)
         self.assertIn("Never reply", prompt)
         self.assertIn("authored by the logged-in user", prompt)
-        self.assertIn("Keep this Codex session interactive", prompt)
+        self.assertIn("Keep this agent session interactive", prompt)
 
 
 class ReviewCommentPromptTests(unittest.TestCase):

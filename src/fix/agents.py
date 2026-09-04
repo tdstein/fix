@@ -9,10 +9,13 @@ import time
 from typing import Callable, Optional, Sequence
 
 from .constants import (
+    DEFAULT_AGENT,
     DEFAULT_AGENT_EFFORT,
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CLAUDE_MODEL,
     LOGGER,
+    SUPPORTED_AGENTS,
 )
 from .errors import CommandError, MonitorError
 from .github import CommandRunner, GitHubClient
@@ -25,13 +28,43 @@ from .repository import (
 from .state import timestamp
 
 
+def normalize_agent(agent: str) -> str:
+    normalized = agent.casefold()
+    if normalized not in SUPPORTED_AGENTS:
+        supported = ", ".join(SUPPORTED_AGENTS)
+        raise ValueError(
+            f"Unsupported agent {agent!r}; expected one of: {supported}."
+        )
+    return normalized
+
+
+def resolve_agent_model(agent: str, model: str) -> str:
+    normalized_agent = normalize_agent(agent)
+    if normalized_agent == "claude" and model == DEFAULT_AGENT_MODEL:
+        return DEFAULT_CLAUDE_MODEL
+    return model
+
+
 def build_agent_command(
     *,
     workdir: Path,
     prompt: str,
+    agent: str = DEFAULT_AGENT,
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
 ) -> list[str]:
+    normalized_agent = normalize_agent(agent)
+    model = resolve_agent_model(normalized_agent, model)
+    if normalized_agent == "claude":
+        return [
+            "claude",
+            "--model",
+            model,
+            "--effort",
+            effort,
+            "--dangerously-skip-permissions",
+            prompt,
+        ]
     return [
         "codex",
         "--model",
@@ -53,11 +86,13 @@ class AgentLauncher:
         self,
         *,
         workdir: Path,
+        agent: str = DEFAULT_AGENT,
         model: str = DEFAULT_AGENT_MODEL,
         effort: str = DEFAULT_AGENT_EFFORT,
     ) -> None:
         self.workdir = workdir
-        self.model = model
+        self.agent = normalize_agent(agent)
+        self.model = resolve_agent_model(self.agent, model)
         self.effort = effort
         self.launch_count = 0
         self.last_pid = None
@@ -68,6 +103,7 @@ class AgentLauncher:
         command = build_agent_command(
             workdir=self.workdir,
             prompt=prompt,
+            agent=self.agent,
             model=self.model,
             effort=self.effort,
         )
@@ -87,7 +123,7 @@ class AgentLauncher:
         except FileNotFoundError as error:
             raise MonitorError(
                 f"Agent command not found: {command[0]!r}; "
-                "install Codex and ensure it is on PATH."
+                f"install {self.agent!r} and ensure it is on PATH."
             ) from error
 
         self.launch_count += 1
@@ -113,8 +149,8 @@ class AgentLauncher:
         return returncode
 
     def _wait_for_process(self, process: subprocess.Popen) -> int:
-        # Codex owns the terminal while it is running. A parent-side Rich
-        # Live renderer would compete with Codex's own interactive redraws.
+        # The selected agent owns the terminal while it is running. A
+        # parent-side Rich Live renderer would compete with its redraws.
         return process.wait(timeout=DEFAULT_AGENT_TIMEOUT)
 
     @staticmethod
@@ -170,9 +206,9 @@ Perform one bounded conflict-resolution attempt:
    checkout unchanged when possible and report the evidence. Do not fabricate
    a resolution.
 
-Once this bounded attempt is complete, exit Codex immediately so control
-returns to the original `fix` process, which will retry synchronization. Do
-not wait for further instructions or leave the session open.
+Once this bounded attempt is complete, exit the agent session immediately so
+control returns to the original `fix` process, which will retry synchronization.
+Do not wait for further instructions or leave the session open.
 """
 
 
@@ -322,9 +358,9 @@ Perform one bounded repair attempt:
 This session is interactive, but do not wait for confirmation before
 investigating or making the smallest safe fix. End with a concise summary of
 what you investigated, what changed, what tests ran, and whether the PR branch
-was pushed. Once the bounded repair attempt is complete, exit Codex immediately
-so control returns to the original `fix` polling loop. Do not wait for further
-instructions or leave the interactive session open.
+was pushed. Once the bounded repair attempt is complete, exit the agent session
+immediately so control returns to the original `fix` polling loop. Do not wait
+for further instructions or leave the interactive session open.
 """
 
 
@@ -402,7 +438,7 @@ Work with the user through this review:
 9. If a review is incorrect or no safe change is warranted, explain why and
    leave the relevant code unchanged.
 
-Keep this Codex session interactive while you and the user work through the
+Keep this agent session interactive while you and the user work through the
 reviews. Do not end the session until the user is finished. End with a concise
 summary of the feedback discussed, what changed, what tests ran, and whether
 the PR branch was pushed.
@@ -549,7 +585,7 @@ Work with the user through these unresolved comments:
     leave the comment without a reply and leave the relevant code and thread
     unresolved unless the user explicitly decides to resolve or defer it.
 
-Keep this Codex session interactive while you and the user work through the
+Keep this agent session interactive while you and the user work through the
 threads. Do not end the session until the user is finished. End with a concise
 summary of the comments discussed, what changed, what tests ran, which threads
 were resolved, and whether the PR branch was pushed.

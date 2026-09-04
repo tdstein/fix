@@ -11,7 +11,12 @@ from typing import Any, Callable, Optional, Sequence
 from rich.live import Live
 from rich.text import Text
 
-from .agents import AgentLauncher, synchronize_with_conflict_resolution
+from .agents import (
+    AgentLauncher,
+    normalize_agent,
+    resolve_agent_model,
+    synchronize_with_conflict_resolution,
+)
 from .checks import (
     fetch_review_threads,
     find_new_review_threads,
@@ -21,13 +26,16 @@ from .checks import (
     log_startup_decision,
 )
 from .constants import (
+    AGENT_ENV,
     AGENT_EFFORT_ENV,
     AGENT_MODEL_ENV,
+    DEFAULT_AGENT,
     DEFAULT_AGENT_EFFORT,
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_INTERVAL,
     LOGGER,
+    SUPPORTED_AGENTS,
 )
 from .errors import MonitorError
 from .github import (
@@ -72,6 +80,13 @@ def _format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {remaining_seconds:02d}s"
     return f"{remaining_seconds}s"
+
+
+def _parse_agent(value: str) -> str:
+    try:
+        return normalize_agent(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _idle_status(
@@ -203,15 +218,27 @@ def log_monitor_completion(
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="fix")
     parser.add_argument(
+        "--agent",
+        default=os.environ.get(AGENT_ENV) or DEFAULT_AGENT,
+        type=_parse_agent,
+        help=(
+            f"Agent harness ({', '.join(SUPPORTED_AGENTS)}; "
+            f"default: ${AGENT_ENV} or {DEFAULT_AGENT})"
+        ),
+    )
+    parser.add_argument(
         "--model",
         default=os.environ.get(AGENT_MODEL_ENV) or DEFAULT_AGENT_MODEL,
-        help=f"Codex model (default: ${AGENT_MODEL_ENV} or {DEFAULT_AGENT_MODEL})",
+        help=(
+            f"Agent model (default: ${AGENT_MODEL_ENV} or "
+            f"{DEFAULT_AGENT_MODEL})"
+        ),
     )
     parser.add_argument(
         "--effort",
         default=os.environ.get(AGENT_EFFORT_ENV) or DEFAULT_AGENT_EFFORT,
         help=(
-            f"Codex reasoning effort "
+            f"Agent reasoning effort "
             f"(default: ${AGENT_EFFORT_ENV} or {DEFAULT_AGENT_EFFORT})"
         ),
     )
@@ -275,6 +302,7 @@ def _default_dependencies() -> RunDependencies:
 
 def run(
     *,
+    agent: str = DEFAULT_AGENT,
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
@@ -283,6 +311,8 @@ def run(
     dependencies: Optional[RunDependencies] = None,
 ) -> int:
     deps = dependencies or _default_dependencies()
+    agent = normalize_agent(agent)
+    model = resolve_agent_model(agent, model)
     deps.configure_logging()
     started_at = time.monotonic()
     workdir = Path.cwd().resolve()
@@ -329,6 +359,7 @@ def run(
     state_store = deps.state_store_factory(state_path)
     agent_launcher = deps.agent_launcher_factory(
         workdir=workdir,
+        agent=agent,
         model=model,
         effort=effort,
     )

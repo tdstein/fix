@@ -19,6 +19,8 @@ from .agents import (
     build_review_comment_prompt,
     build_review_prompt,
     launch_conflict_agent,
+    normalize_agent,
+    resolve_agent_model,
 )
 from .agents import (
     synchronize_with_conflict_resolution as _synchronize_with_conflict_resolution,
@@ -44,11 +46,14 @@ from .cli import (
     sleep_until_next_poll,
 )
 from .constants import (
+    AGENT_ENV,
     AGENT_EFFORT_ENV,
     AGENT_MODEL_ENV,
+    DEFAULT_AGENT,
     DEFAULT_AGENT_EFFORT,
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_CLAUDE_MODEL,
     DEFAULT_INTERVAL,
     DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD,
     FAILURE_BUCKETS,
@@ -61,6 +66,7 @@ from .constants import (
     REVIEW_KEY_VERSION,
     REVIEW_THREAD_KEY_VERSION,
     STATE_VERSION,
+    SUPPORTED_AGENTS,
     SUBMITTED_REVIEW_STATES,
 )
 from .errors import ChecksNotReportedError, CommandError, MonitorError
@@ -144,6 +150,7 @@ class Monitor(_Monitor):
 
 def run(
     *,
+    agent: str = DEFAULT_AGENT,
     model: str = DEFAULT_AGENT_MODEL,
     effort: str = DEFAULT_AGENT_EFFORT,
     verbose: bool = False,
@@ -153,6 +160,7 @@ def run(
     """Run the monitor using the package-level compatibility hooks."""
 
     return _run(
+        agent=agent,
         model=model,
         effort=effort,
         verbose=verbose,
@@ -185,6 +193,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "model": args.model,
             "effort": args.effort,
         }
+        if args.agent != DEFAULT_AGENT:
+            run_kwargs["agent"] = args.agent
         if args.verbose:
             run_kwargs["verbose"] = True
         if args.force_sync:
@@ -204,6 +214,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 __all__ = [
+    "AGENT_ENV",
     "AGENT_EFFORT_ENV",
     "AGENT_MODEL_ENV",
     "AgentLauncher",
@@ -212,9 +223,11 @@ __all__ = [
     "ChecksNotReportedError",
     "CommandError",
     "CommandRunner",
+    "DEFAULT_AGENT",
     "DEFAULT_AGENT_EFFORT",
     "DEFAULT_AGENT_MODEL",
     "DEFAULT_AGENT_TIMEOUT",
+    "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_INTERVAL",
     "DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD",
     "FAILURE_BUCKETS",
@@ -235,6 +248,7 @@ __all__ = [
     "ReviewComment",
     "ReviewThread",
     "STATE_VERSION",
+    "SUPPORTED_AGENTS",
     "SUBMITTED_REVIEW_STATES",
     "StartupStatus",
     "StateStore",
@@ -260,9 +274,11 @@ __all__ = [
     "local_git_value",
     "log_startup_decision",
     "main",
+    "normalize_agent",
     "parse_args",
     "run",
     "render_monitor_header",
+    "resolve_agent_model",
     "repository_from_pull_request_url",
     "should_synchronize_pull_request",
     "sleep_until_next_poll",

@@ -1,15 +1,15 @@
 # fix
 
-`fix` watches a GitHub pull request and launches one interactive Codex session
+`fix` watches a GitHub pull request and launches one interactive agent session
 for each new CI failure, review, or unresolved inline review comment from
 someone other than the pull request author. Before replying to GitHub comments,
 it checks the authenticated `gh` user and never replies to comments authored by
 that user.
 
 It is intended for a clean local checkout of the pull request branch. The
-monitor can update the branch from its configured base branch, launch Codex to
-repair failures or resolve conflicts, and push validated changes to the pull
-request branch.
+monitor can update the branch from its configured base branch, launch the
+selected agent to repair failures or resolve conflicts, and push validated
+changes to the pull request branch.
 
 ## Requirements
 
@@ -18,8 +18,8 @@ request branch.
 - Git
 - The [GitHub CLI](https://cli.github.com/) (`gh`), authenticated with access
   to the repository
-- The Codex CLI (`codex`) on `PATH`, with access to the configured
-  `openai.gpt-5.6-luna` model
+- A supported agent CLI on `PATH`: Codex (`codex`) or Claude Code
+  (`claude`). Codex is the default.
 - A Unix-like operating system; the monitor uses `fcntl` for process locking
 
 If the pull request changes a GitHub Actions workflow, the `gh` OAuth token
@@ -29,7 +29,7 @@ also needs the `workflow` scope. Add it with:
 gh auth refresh --hostname github.com --scopes workflow
 ```
 
-The Codex agent needs permission to commit and push the pull request branch.
+The selected agent needs permission to commit and push the pull request branch.
 
 ## Install
 
@@ -81,11 +81,17 @@ fix https://github.com/example-org/example-repo/pull/123
 It exits with an error if the current directory is not a checkout of that
 repository.
 
-Choose the Codex model and reasoning effort with flags:
+Choose the agent harness, model, and reasoning effort with flags:
 
 ```bash
-fix --model openai.gpt-5.6-luna --effort max
+fix --agent codex --model openai.gpt-5.6-luna --effort max
+fix --agent claude --model sonnet --effort max
 ```
+
+The `--agent` option accepts `codex` or `claude` and defaults to `codex`. The
+matching environment variable is `FIX_AGENT`. If no model is selected,
+`openai.gpt-5.6-luna` is used for Codex and `sonnet` for Claude Code. The
+`FIX_MODEL` value must be valid for the selected agent.
 
 Use `--verbose` to show the full monitor configuration panel instead of the
 compact one-line header.
@@ -95,8 +101,7 @@ from its configured base branch through GitHub before monitoring starts. The
 checkout must still be clean and at the current pull request head.
 
 The matching environment variables are `FIX_MODEL` and `FIX_EFFORT`. Flags take
-precedence over environment variables; without either, `fix` uses
-`openai.gpt-5.6-luna` and `max`.
+precedence over environment variables; without either, `fix` uses `max` effort.
 
 `fix` polls every minute. After synchronization advances the pull
 request head, it waits for the next poll so GitHub can recognize the new
@@ -117,7 +122,7 @@ log-friendly.
 Before monitoring an open pull request, `fix` checks its CI status and
 mergeability. It updates the branch from the pull request's configured base
 branch only when CI has a failure or GitHub reports merge conflicts. If GitHub
-reports merge conflicts, it launches a bounded Codex session to resolve them
+reports merge conflicts, it launches a bounded agent session to resolve them
 and retries the synchronization. It does not recursively update parent pull
 requests in a stack; update those from the root toward the monitored pull
 request.
@@ -135,9 +140,9 @@ stored in the same directory under `logs/`.
 ## Security considerations
 
 Run `fix` only in repositories and worktrees you trust. The repair, review, and
-comment agents receive repository contents and diagnostic output, run with
-Codex approval enabled and network access enabled, and may commit, push, and
-resolve review threads.
+comment agents receive repository contents and diagnostic output, run with the
+selected agent's unattended approval and network access settings, and may
+commit, push, and resolve review threads.
 Review the generated diff and the session logs when investigating unexpected
 behavior. Do not run it with credentials or repositories that the agent should
 not be able to access.
