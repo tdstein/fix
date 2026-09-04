@@ -281,6 +281,23 @@ class ReviewTests(unittest.TestCase):
 
         self.assertFalse(review.is_from_other(self.pull_request))
 
+    def test_review_from_current_user_is_ignored_even_when_not_pr_author(self):
+        review = Review(
+            id="review-1",
+            author_login="Taylor",
+            state="COMMENTED",
+            body="Self-review note.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha="abc123",
+        )
+
+        self.assertFalse(
+            review.is_from_other(
+                self.pull_request,
+                current_user_login="taylor",
+            )
+        )
+
 
 class ReviewThreadTests(unittest.TestCase):
     def setUp(self):
@@ -337,6 +354,55 @@ class ReviewThreadTests(unittest.TestCase):
             thread.review_thread_key(),
             dataclasses.replace(thread, is_outdated=False).review_thread_key(),
         )
+
+    def test_current_user_filter_ignores_own_thread(self):
+        own = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            comments=(
+                ReviewComment(
+                    id="comment-1",
+                    author_login="Taylor",
+                    body="I will handle this.",
+                ),
+            ),
+        )
+
+        found = fix.find_new_review_threads(
+            threads=[own],
+            pull_request=self.pull_request,
+            seen_threads={},
+            current_user_login="taylor",
+        )
+
+        self.assertEqual(found, [])
+
+    def test_current_user_filter_keeps_mixed_thread_for_other_comments(self):
+        mixed = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            comments=(
+                ReviewComment(
+                    id="comment-1",
+                    author_login="maintainer",
+                    body="Please handle this.",
+                ),
+                ReviewComment(
+                    id="comment-2",
+                    author_login="Taylor",
+                    body="I will handle this.",
+                ),
+            ),
+        )
+
+        found = fix.find_new_review_threads(
+            threads=[mixed],
+            pull_request=self.pull_request,
+            seen_threads={},
+            current_user_login="taylor",
+        )
+
+        self.assertEqual([thread.id for _, thread in found], ["thread-1"])
 
     def test_new_thread_filter_ignores_resolved_and_own_threads(self):
         comment = ReviewComment(
@@ -1103,6 +1169,7 @@ class ReviewPromptTests(unittest.TestCase):
             pull_request,
             [("review-key", review)],
             workdir=Path("/tmp/example-repo"),
+            current_user_login="taylor",
         )
 
         self.assertIn("Please handle this edge case.", prompt)
@@ -1110,6 +1177,9 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIn("Walk the user through", prompt)
         self.assertIn("clearly correct fixes", prompt)
         self.assertIn("subjective, ambiguous", prompt)
+        self.assertIn("gh api user --jq .login", prompt)
+        self.assertIn("Never reply", prompt)
+        self.assertIn("authored by the logged-in user", prompt)
         self.assertIn("Keep this Codex session interactive", prompt)
 
 
@@ -1146,6 +1216,7 @@ class ReviewCommentPromptTests(unittest.TestCase):
             pull_request,
             [("thread-key", thread)],
             workdir=Path("/tmp/example-repo"),
+            current_user_login="taylor",
         )
 
         self.assertIn("Handle this edge case.", prompt)
@@ -1156,6 +1227,10 @@ class ReviewCommentPromptTests(unittest.TestCase):
         self.assertIn("Do not resolve a thread merely because it was read.", prompt)
         self.assertIn("Iterate through every listed comment individually", prompt)
         self.assertIn("reply to the comment", prompt)
+        self.assertIn("gh api user --jq .login", prompt)
+        self.assertIn("Never reply to a comment whose", prompt)
+        self.assertIn("author matches the verified logged-in user", prompt)
+        self.assertIn("eligible only after verifying the author is not", prompt)
         self.assertIn("create a GitHub issue", prompt)
         self.assertIn("implement the requested change", prompt)
 
@@ -1239,6 +1314,33 @@ class GitHubClientTests(unittest.TestCase):
         self.assertEqual(pull_request.author_login, "contributor")
         self.assertEqual(pull_request.mergeable, "MERGEABLE")
         self.assertEqual(pull_request.merge_state_status, "CLEAN")
+
+    def test_current_user_login_is_loaded_from_gh_and_cached(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, command, *, cwd=None):
+                self.calls.append((command, cwd))
+                if command == ["gh", "api", "user", "--jq", ".login"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "taylor\n",
+                        "",
+                    )
+                raise AssertionError(f"unexpected command: {command}")
+
+        runner = Runner()
+        client = GitHubClient(
+            cwd=Path("/tmp/example-repo"),
+            runner=runner,
+        )
+
+        self.assertEqual(client.get_current_user_login(), "taylor")
+        self.assertEqual(client.get_current_user_login(), "taylor")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(runner.calls[0][1], Path("/tmp/example-repo"))
 
     def test_reviews_are_loaded_from_pull_request_view(self):
         class Runner:
@@ -1456,12 +1558,20 @@ class SynchronizeRunner:
 
 
 class FakeGitHub:
-    def __init__(self, pull_requests, checks, reviews=None, review_threads=None):
+    def __init__(
+        self,
+        pull_requests,
+        checks,
+        reviews=None,
+        review_threads=None,
+        current_user_login=None,
+    ):
         self.pull_requests = iter(pull_requests)
         self.last_pull_request = pull_requests[-1]
         self.checks = checks
         self.reviews = reviews or []
         self.review_threads = review_threads or []
+        self.current_user_login = current_user_login
         self.check_calls = 0
         self.review_calls = 0
         self.review_thread_calls = 0
@@ -1486,6 +1596,9 @@ class FakeGitHub:
     def get_review_threads(self, pull_request):
         self.review_thread_calls += 1
         return self.review_threads
+
+    def get_current_user_login(self):
+        return self.current_user_login
 
 
 class FakeAgent:
@@ -1990,6 +2103,47 @@ class MonitorTests(unittest.TestCase):
                 [dataclasses.replace(self.pull_request, author_login="contributor")],
                 [passed_check],
                 [own_review],
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            self.assertTrue(monitor.poll_once())
+            self.assertEqual(agent.prompts, [])
+
+    def test_passed_ci_ignores_review_from_logged_in_user(self):
+        own_review = Review(
+            id="review-1",
+            author_login="Taylor",
+            state="COMMENTED",
+            body="Self-review note.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha=self.pull_request.head_sha,
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request],
+                [passed_check],
+                [own_review],
+                current_user_login="taylor",
             )
             agent = FakeAgent()
             monitor = Monitor(

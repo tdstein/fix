@@ -16,6 +16,7 @@ from .checks import (
     fetch_review_threads,
     find_new_review_threads,
     find_new_reviews,
+    get_current_user_login,
     inspect_startup,
     log_startup_decision,
 )
@@ -328,10 +329,12 @@ def run(
                 and startup_status.mergeability_is_known
             ):
                 state = state_store.load()
+                current_user_login = get_current_user_login(github=github)
                 new_reviews = find_new_reviews(
                     reviews=github.get_reviews(initial_pull_request),
                     pull_request=initial_pull_request,
                     seen_reviews=state.get("seen_reviews", {}),
+                    current_user_login=current_user_login,
                 )
                 new_comments = find_new_review_threads(
                     threads=fetch_review_threads(
@@ -340,6 +343,7 @@ def run(
                     ),
                     pull_request=initial_pull_request,
                     seen_threads=state.get("seen_comments", {}),
+                    current_user_login=current_user_login,
                 )
                 if not new_reviews and not new_comments:
                     elapsed = time.monotonic() - started_at

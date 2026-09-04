@@ -108,6 +108,7 @@ class GitHubClient:
     ) -> None:
         self.cwd = cwd
         self.repo: Optional[str] = None
+        self._current_user_login: Optional[str] = None
         self.runner = runner or CommandRunner()
 
     def resolve_repo(self) -> str:
@@ -121,6 +122,23 @@ class GitHubClient:
         if not output:
             raise MonitorError("Could not determine the current GitHub repository.")
         self.repo = output
+        return output
+
+    def get_current_user_login(self) -> str:
+        """Return the login for the account authenticated in ``gh``."""
+
+        if self._current_user_login is not None:
+            return self._current_user_login
+        output = _command_output(
+            self.runner,
+            ["gh", "api", "user", "--jq", ".login"],
+            cwd=self.cwd,
+        )
+        if not output:
+            raise MonitorError(
+                "Could not determine the logged-in GitHub user."
+            )
+        self._current_user_login = output
         return output
 
     def get_pull_request(

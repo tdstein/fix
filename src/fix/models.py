@@ -189,7 +189,14 @@ class Review:
     def is_submitted(self) -> bool:
         return bool(self.submitted_at) or self.state in SUBMITTED_REVIEW_STATES
 
-    def is_from_other(self, pull_request: PullRequest) -> bool:
+    def is_from_other(
+        self,
+        pull_request: PullRequest,
+        *,
+        current_user_login: Optional[str] = None,
+    ) -> bool:
+        if _same_login(self.author_login, current_user_login):
+            return False
         if not self.author_login:
             return False
         if not pull_request.author_login:
@@ -321,7 +328,12 @@ class ReviewThread:
     def latest_comment(self) -> Optional[ReviewComment]:
         return self.comments[-1] if self.comments else None
 
-    def is_from_other(self, pull_request: PullRequest) -> bool:
+    def is_from_other(
+        self,
+        pull_request: PullRequest,
+        *,
+        current_user_login: Optional[str] = None,
+    ) -> bool:
         authors = [
             author
             for author in [self.author_login]
@@ -329,6 +341,10 @@ class ReviewThread:
             if author
         ]
         if not authors:
+            return False
+        if current_user_login and not any(
+            not _same_login(author, current_user_login) for author in authors
+        ):
             return False
         if not pull_request.author_login:
             return True
@@ -369,6 +385,10 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _same_login(left: str, right: Optional[str]) -> bool:
+    return bool(left and right and left.casefold() == right.casefold())
 
 
 def _as_bool(value: Any) -> bool:

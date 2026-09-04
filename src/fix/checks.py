@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from .constants import LOGGER
 from .errors import ChecksNotReportedError
@@ -85,17 +85,34 @@ def find_new_reviews(
     reviews: Sequence[Review],
     pull_request: PullRequest,
     seen_reviews: Mapping[str, Any],
+    current_user_login: Optional[str] = None,
 ) -> list[tuple[str, Review]]:
     other_reviews = [
         review
         for review in reviews
-        if review.is_submitted and review.is_from_other(pull_request)
+        if review.is_submitted
+        and review.is_from_other(
+            pull_request,
+            current_user_login=current_user_login,
+        )
     ]
     return [
         (review.review_key(), review)
         for review in other_reviews
         if review.review_key() not in seen_reviews
     ]
+
+
+def get_current_user_login(*, github: GitHubClient) -> Optional[str]:
+    """Read the authenticated ``gh`` user when the client supports it."""
+
+    getter = getattr(github, "get_current_user_login", None)
+    if not callable(getter):
+        return None
+    value = getter()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def fetch_review_threads(
@@ -121,11 +138,16 @@ def find_new_review_threads(
     threads: Sequence[ReviewThread],
     pull_request: PullRequest,
     seen_threads: Mapping[str, Any],
+    current_user_login: Optional[str] = None,
 ) -> list[tuple[str, ReviewThread]]:
     unresolved_threads = [
         thread
         for thread in threads
-        if thread.is_unresolved and thread.is_from_other(pull_request)
+        if thread.is_unresolved
+        and thread.is_from_other(
+            pull_request,
+            current_user_login=current_user_login,
+        )
     ]
     return [
         (thread.review_thread_key(), thread)
@@ -139,6 +161,7 @@ def find_new_comments(
     comments: Sequence[ReviewThread],
     pull_request: PullRequest,
     seen_comments: Mapping[str, Any],
+    current_user_login: Optional[str] = None,
 ) -> list[tuple[str, ReviewThread]]:
     """Compatibility name for callers that refer to review threads as comments."""
 
@@ -146,6 +169,7 @@ def find_new_comments(
         threads=comments,
         pull_request=pull_request,
         seen_threads=seen_comments,
+        current_user_login=current_user_login,
     )
 
 

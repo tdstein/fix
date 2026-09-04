@@ -2,7 +2,9 @@
 
 `fix` watches a GitHub pull request and launches one interactive Codex session
 for each new CI failure, review, or unresolved inline review comment from
-someone other than the pull request author.
+someone other than the pull request author. Before replying to GitHub comments,
+it checks the authenticated `gh` user and never replies to comments authored by
+that user.
 
 It is intended for a clean local checkout of the pull request branch. The
 monitor can update the branch from its configured base branch, launch Codex to
@@ -95,7 +97,8 @@ checks are waiting or have no failures, it checks pull request reviews and
 unresolved inline review threads. Review and comment sessions summarize
 feedback with you, apply small clearly correct fixes, and pause for your
 judgment on subjective changes. A comment session can resolve a thread after
-its concern has been addressed.
+its concern has been addressed, but it does not reply to self-authored
+comments.
 
 In an interactive terminal, `fix` shows a compact monitor summary and
 color-coded check and agent statuses. Piped output remains plain and

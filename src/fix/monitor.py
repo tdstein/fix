@@ -16,6 +16,7 @@ from .checks import (
     find_new_review_threads,
     find_new_reviews,
     format_ci_check,
+    get_current_user_login,
 )
 from .constants import (
     DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD,
@@ -239,11 +240,13 @@ class Monitor:
                 github=self.github,
                 pull_request=pull_request,
             )
+            current_user_login = get_current_user_login(github=self.github)
             seen_comments = state.setdefault("seen_comments", {})
             new_comments = find_new_review_threads(
                 threads=review_threads,
                 pull_request=pull_request,
                 seen_threads=seen_comments,
+                current_user_login=current_user_login,
             )
 
             if new_comments:
@@ -253,6 +256,7 @@ class Monitor:
                     new_comments=new_comments,
                     state=state,
                     seen_comments=seen_comments,
+                    current_user_login=current_user_login,
                 )
 
             reviews = self.github.get_reviews(pull_request)
@@ -261,6 +265,7 @@ class Monitor:
                 reviews=reviews,
                 pull_request=pull_request,
                 seen_reviews=seen_reviews,
+                current_user_login=current_user_login,
             )
 
             if new_reviews:
@@ -270,6 +275,7 @@ class Monitor:
                     new_reviews=new_reviews,
                     state=state,
                     seen_reviews=seen_reviews,
+                    current_user_login=current_user_login,
                 )
 
             if checks_reported and all(check.is_complete for check in checks):
@@ -400,6 +406,7 @@ class Monitor:
         new_comments: Sequence[tuple[str, ReviewThread]],
         state: dict[str, Any],
         seen_comments: dict[str, Any],
+        current_user_login: Optional[str],
     ) -> bool:
         try:
             self._validate_agent_checkout(
@@ -422,6 +429,7 @@ class Monitor:
             pull_request,
             new_comments,
             workdir=self.workdir,
+            current_user_login=current_user_login,
         )
         self.agents_launched += 1
         self._log_agent_launch(
@@ -476,6 +484,7 @@ class Monitor:
         new_reviews: Sequence[tuple[str, Review]],
         state: dict[str, Any],
         seen_reviews: dict[str, Any],
+        current_user_login: Optional[str],
     ) -> bool:
         try:
             self._validate_agent_checkout(
@@ -494,7 +503,12 @@ class Monitor:
             / f"{timestamp().replace(':', '').replace('+00:00', 'Z')}"
             f"-{pull_request.head_sha[:12]}-review-{len(seen_reviews) + 1}.log"
         )
-        prompt = build_review_prompt(pull_request, new_reviews, workdir=self.workdir)
+        prompt = build_review_prompt(
+            pull_request,
+            new_reviews,
+            workdir=self.workdir,
+            current_user_login=current_user_login,
+        )
         self.agents_launched += 1
         self._log_agent_launch(
             agent_kind="review",
