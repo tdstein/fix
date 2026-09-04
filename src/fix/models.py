@@ -7,6 +7,7 @@ from typing import Any, Mapping, Optional
 
 from .constants import (
     FAILURE_BUCKETS,
+    FAILURE_GROUP_KEY_VERSION,
     FAILURE_KEY_VERSION,
     FAILURE_STATES,
     PASS_BUCKETS,
@@ -100,6 +101,20 @@ class Check:
             "started_at": self.started_at,
             "completed_at": self.completed_at if not self.started_at else "",
         }
+        serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def failure_group_key(self, head_sha: str) -> str:
+        """Return a stable identity for a logical failed check on a head."""
+
+        identity = {
+            "version": FAILURE_GROUP_KEY_VERSION,
+            "head_sha": head_sha,
+            "name": self.name,
+            "workflow": self.workflow,
+        }
+        if not self.name and not self.workflow:
+            identity["link"] = self.link
         serialized = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 

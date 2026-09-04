@@ -40,6 +40,7 @@ class StateStore:
                 "seen_reviews": {},
                 "seen_comments": {},
                 "agent_attempts_by_head": {},
+                "handled_failure_groups_by_head": {},
             }
 
         try:

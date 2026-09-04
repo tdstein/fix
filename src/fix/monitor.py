@@ -230,6 +230,11 @@ class Monitor:
         self._last_check_line = check_line
 
         if not failures:
+            if checks_reported:
+                state.setdefault("handled_failure_groups_by_head", {}).pop(
+                    pull_request.head_sha,
+                    None,
+                )
             review_threads = fetch_review_threads(
                 github=self.github,
                 pull_request=pull_request,
@@ -290,10 +295,22 @@ class Monitor:
             return False
 
         seen_failures = state.setdefault("seen_failures", {})
+        handled_failure_groups_by_head = state.setdefault(
+            "handled_failure_groups_by_head",
+            {},
+        )
+        handled_failure_groups = handled_failure_groups_by_head.setdefault(
+            pull_request.head_sha,
+            {},
+        )
         new_failures = [
             (check.failure_key(pull_request.head_sha), check)
             for check in failures
-            if check.failure_key(pull_request.head_sha) not in seen_failures
+            if (
+                check.failure_key(pull_request.head_sha) not in seen_failures
+                and check.failure_group_key(pull_request.head_sha)
+                not in handled_failure_groups
+            )
         ]
 
         if not new_failures:
@@ -365,8 +382,12 @@ class Monitor:
             return False
 
         attempts_by_head[pull_request.head_sha] = attempts + 1
-        for key, _ in new_failures:
-            seen_failures[key] = {"seen_at": timestamp()}
+        seen_at = timestamp()
+        for key, check in new_failures:
+            seen_failures[key] = {"seen_at": seen_at}
+            handled_failure_groups[check.failure_group_key(pull_request.head_sha)] = {
+                "seen_at": seen_at,
+            }
         self._prune_seen_items(seen_failures)
         self.state_store.save(state)
         self._log_agent_result(agent_kind="repair", returncode=returncode)

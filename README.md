@@ -114,7 +114,10 @@ request.
 State is stored under `$XDG_STATE_HOME/fix/`,
 `$XDG_CACHE_HOME/fix/`, or `~/.cache/fix/`, using one JSON file per pull
 request. The state records handled CI failures, reviews, and inline comment
-threads. Agent session logs are stored in the same directory under `logs/`.
+threads. A failed check is suppressed after one repair session for the same
+pull request head until CI reports a non-failing state, which prevents a flaky
+check from immediately launching duplicate sessions. Agent session logs are
+stored in the same directory under `logs/`.
 
 ## Security considerations
 

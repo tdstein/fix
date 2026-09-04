@@ -192,6 +192,33 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(check.is_complete)
         self.assertFalse(check.is_pass)
 
+    def test_failure_group_key_ignores_rerun_metadata(self):
+        check = Check(
+            name="server amd64",
+            state="FAILURE",
+            bucket="fail",
+            workflow="ci",
+            link="https://github.com/example-org/example-repo/actions/runs/1",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="compiler error",
+        )
+        rerun = dataclasses.replace(
+            check,
+            link="https://github.com/example-org/example-repo/actions/runs/2",
+            started_at="2026-08-14T13:00:00Z",
+            completed_at="2026-08-14T13:10:00Z",
+        )
+
+        self.assertEqual(
+            check.failure_group_key("abc"),
+            rerun.failure_group_key("abc"),
+        )
+        self.assertNotEqual(
+            check.failure_group_key("abc"),
+            check.failure_group_key("def"),
+        )
+
     def test_success_is_not_a_failure(self):
         check = Check(
             name="lint",
@@ -1019,6 +1046,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("failure-key", prompt)
         self.assertIn("fix-ci", prompt)
         self.assertIn("Never force-push", prompt)
+        self.assertIn("flaky CI failure", prompt)
+        self.assertIn("gh run rerun", prompt)
         self.assertIn("exit Codex", prompt)
         self.assertIn("original `fix` polling loop", prompt)
 
@@ -1620,6 +1649,75 @@ class MonitorTests(unittest.TestCase):
             self.assertFalse(monitor.poll_once())
             self.assertFalse(monitor.poll_again_immediately)
             self.assertEqual(len(agent.prompts), 1)
+
+    def test_refreshed_failure_metadata_does_not_relaunch_repair(self):
+        refreshed_failure = dataclasses.replace(
+            self.failure,
+            link="https://github.com/example-org/example-repo/actions/runs/2",
+            started_at="2026-08-14T13:00:00Z",
+            completed_at="2026-08-14T13:10:00Z",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [self.failure],
+            )
+            github.get_checks = mock.Mock(
+                side_effect=[[self.failure], [refreshed_failure]],
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            monitor.poll_once()
+            monitor.poll_once()
+
+        self.assertEqual(len(agent.prompts), 1)
+
+    def test_failed_rerun_can_be_repaired_after_ci_recovers_to_pending(self):
+        rerun_failure = dataclasses.replace(
+            self.failure,
+            link="https://github.com/example-org/example-repo/actions/runs/2",
+            started_at="2026-08-14T13:00:00Z",
+            completed_at="2026-08-14T13:10:00Z",
+        )
+        pending = dataclasses.replace(
+            self.failure,
+            state="IN_PROGRESS",
+            bucket="pending",
+            completed_at="",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request] * 4,
+                [self.failure],
+            )
+            github.get_checks = mock.Mock(
+                side_effect=[[self.failure], [pending], [rerun_failure]],
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            monitor.poll_once()
+            monitor.poll_once()
+            monitor.poll_once()
+
+        self.assertEqual(len(agent.prompts), 2)
 
     def test_new_head_allows_a_new_repair_attempt(self):
         with tempfile.TemporaryDirectory() as directory:

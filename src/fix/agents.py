@@ -298,21 +298,25 @@ Perform one bounded repair attempt:
 2. Inspect the failed checks and fetch their GitHub Actions logs with `gh`.
 3. Investigate the repository code, tests, CI configuration, and recent diff.
    Assume a repository defect until evidence proves the failure is external.
-4. Make the smallest correct fix if one is needed. Do not change unrelated
+4. If the evidence shows a transient or flaky CI failure, rerun the failed job
+   or workflow once with the narrowest supported `gh run rerun` command. Confirm
+   the rerun belongs to this pull request head and was accepted by GitHub. Do
+   not make a speculative code change for a flaky or external failure.
+5. Make the smallest correct fix if one is needed. Do not change unrelated
    files or paper over a failure by weakening tests.
-5. Use the target repository's documented commands for formatting, builds, and
+6. Use the target repository's documented commands for formatting, builds, and
    tests. Before committing, inspect the diff and confirm there are no
    unrelated changes. Never use `git add .`, `git add -A`, or
    `git commit --amend`.
-6. Before committing and again immediately before pushing, use `gh api` to
+7. Before committing and again immediately before pushing, use `gh api` to
    confirm the PR head is still `{pull_request.head_sha}` and belongs to
    `{pull_request.head_repo or pull_request.repo}`. If it changed, abort
    without pushing.
-7. If the fix is validated, commit it with a descriptive message and push
+8. If the fix is validated, commit it with a descriptive message and push
    only to the PR head ref `{pull_request.head_branch}` in the PR head
    repository. Never force-push, reset, clean, or discard pre-existing user
    changes.
-8. If the failure is external or no safe fix is possible, leave the checkout
+9. If the failure is external or no safe fix is possible, leave the checkout
    unchanged and report the evidence. Do not fabricate a code change.
 
 This session is interactive, but do not wait for confirmation before
