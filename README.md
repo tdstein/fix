@@ -1,8 +1,8 @@
 # fix
 
 `fix` watches a GitHub pull request and launches one interactive agent session
-for each new CI failure, review, or unresolved inline review comment from
-someone other than the pull request author. Before replying to GitHub comments,
+for each batch of new CI failures, reviews, or unresolved inline review
+comments from someone other than the pull request author. Before replying to GitHub comments,
 it checks the authenticated `gh` user and never replies to comments authored by
 that user.
 
