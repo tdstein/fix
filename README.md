@@ -165,6 +165,10 @@ The project dependencies are resolved by `uv`. Run the test suite with:
 make test
 ```
 
+Make targets run in make's current working directory. When invoking the
+Makefile from another directory, pass the project directory with `-C`, for
+example `make -C /path/to/fix test`.
+
 The equivalent direct command is:
 
 ```bash
