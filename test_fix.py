@@ -2032,6 +2032,120 @@ class MonitorTests(unittest.TestCase):
             self.assertFalse(monitor.poll_again_immediately)
             self.assertEqual(len(agent.prompts), 1)
 
+    def test_verification_failures_retry_within_the_attempt_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [self.failure])
+            github.get_pull_request = mock.Mock(
+                side_effect=[
+                    self.pull_request,
+                    fix.MonitorError("transient GitHub API failure"),
+                    self.pull_request,
+                    fix.MonitorError("transient GitHub API failure"),
+                ]
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            monitor.poll_once()
+            monitor.poll_once()
+
+            self.assertEqual(len(agent.prompts), 2)
+            self.assertEqual(
+                state_store.load()["agent_attempts_by_head"],
+                {self.pull_request.head_sha: 2},
+            )
+            self.assertEqual(state_store.load()["seen_failures"], {})
+
+    def test_verification_attempt_count_survives_monitor_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [self.failure])
+            github.get_pull_request = mock.Mock(
+                side_effect=[
+                    self.pull_request,
+                    fix.MonitorError("transient GitHub API failure"),
+                ]
+            )
+            first_agent = FakeAgent()
+            first_monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=first_agent,
+                runner=github.runner,
+            )
+            first_monitor.poll_once()
+
+            github.get_pull_request = mock.Mock(
+                side_effect=[
+                    self.pull_request,
+                    fix.MonitorError("transient GitHub API failure"),
+                ]
+            )
+            second_agent = FakeAgent()
+            second_monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=second_agent,
+                runner=github.runner,
+            )
+            second_monitor.poll_once()
+
+            self.assertEqual(len(first_agent.prompts), 1)
+            self.assertEqual(len(second_agent.prompts), 1)
+            self.assertIn("attempt-2.log", str(second_agent.prompts[0][1]))
+            self.assertEqual(
+                state_store.load()["agent_attempts_by_head"],
+                {self.pull_request.head_sha: 2},
+            )
+
+    def test_verification_failures_stop_launching_at_the_attempt_cap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub([self.pull_request], [self.failure])
+            transient_failure = fix.MonitorError("transient GitHub API failure")
+            github.get_pull_request = mock.Mock(
+                side_effect=[
+                    item
+                    for _ in range(fix.DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD)
+                    for item in (self.pull_request, transient_failure)
+                ]
+                + [self.pull_request]
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            for _ in range(fix.DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD + 1):
+                monitor.poll_once()
+
+            self.assertEqual(
+                len(agent.prompts), fix.DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD
+            )
+            self.assertEqual(
+                state_store.load()["agent_attempts_by_head"],
+                {
+                    self.pull_request.head_sha: fix.DEFAULT_MAX_AGENT_ATTEMPTS_PER_HEAD
+                },
+            )
+
     def test_refreshed_failure_metadata_does_not_relaunch_repair(self):
         refreshed_failure = dataclasses.replace(
             self.failure,
