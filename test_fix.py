@@ -575,7 +575,11 @@ class RunTests(unittest.TestCase):
 
         state_store.assert_called_once_with(Path("/tmp/state.json"))
 
-    def test_run_skips_initial_synchronization_for_green_clean_pr(self):
+    @mock.patch("fix.render_monitor_header", return_value=False)
+    def test_run_skips_initial_synchronization_for_green_clean_pr(
+        self,
+        render_monitor_header,
+    ):
         pull_request = PullRequest(
             repo="example-org/example-repo",
             number=123,
