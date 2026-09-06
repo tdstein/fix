@@ -158,7 +158,7 @@ make test
 The equivalent direct command is:
 
 ```bash
-uv run python -m unittest discover -v
+uv run --locked python -m unittest discover -v
 ```
 
 ## License
