@@ -278,7 +278,7 @@ class Monitor:
                     current_user_login=current_user_login,
                 )
 
-            if checks_reported and all(check.is_complete for check in checks):
+            if checks_reported and checks and all(check.is_complete for check in checks):
                 self.state_store.save(state)
                 self.stop_reason = (
                     f"CI is complete with {len(checks)} "
