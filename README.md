@@ -137,6 +137,16 @@ pull request head until CI reports a non-failing state, which prevents a flaky
 check from immediately launching duplicate sessions. Agent session logs are
 stored in the same directory under `logs/`.
 
+Each agent session has a fixed two-hour timeout. If a session reaches that
+limit, `fix` terminates the agent process group and records the timeout in
+the session log before monitoring resumes.
+
+Repair agents are limited to ten attempts for each pull request head. This
+count is persisted with the monitor state. After ten attempts, `fix` suppresses
+further repair launches for that head, but monitoring continues and still
+polls GitHub for changes. These are fixed operational limits; neither one has
+a CLI flag or environment-variable setting.
+
 ## Security considerations
 
 Run `fix` only in repositories and worktrees you trust. The repair, review, and
