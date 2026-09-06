@@ -136,7 +136,14 @@ request. The state records handled CI failures, reviews, and inline comment
 threads. A failed check is suppressed after one repair session for the same
 pull request head until CI reports a non-failing state, which prevents a flaky
 check from immediately launching duplicate sessions. Agent session logs are
-stored in the same directory under `logs/`.
+stored in the same directory under `logs/`. Each log records the session's
+start time, working directory, command, prompt, finish time, and exit code. If
+the session exceeds the configured timeout, the log also records that it timed
+out and the timeout duration.
+
+The logs contain launcher metadata only. The agent conversation and the
+subprocess's standard output and standard error are not captured in these
+files; the subprocess inherits the terminal's standard streams instead.
 
 ## Security considerations
 
@@ -144,9 +151,11 @@ Run `fix` only in repositories and worktrees you trust. The repair, review, and
 comment agents receive repository contents and diagnostic output, run with the
 selected agent's unattended approval and network access settings, and may
 commit, push, and resolve review threads.
-Review the generated diff and the session logs when investigating unexpected
-behavior. Do not run it with credentials or repositories that the agent should
-not be able to access.
+Review the generated diff and the session logs for launch and completion
+metadata when investigating unexpected behavior. To inspect the agent
+conversation or command output, review the terminal or agent's own logging
+facilities. Do not run it with credentials or repositories that the agent
+should not be able to access.
 
 ## Development
 
