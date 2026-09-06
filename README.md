@@ -2,9 +2,10 @@
 
 `fix` watches a GitHub pull request and launches one interactive agent session
 for each batch of new CI failures, reviews, or unresolved inline review
-comments from someone other than the pull request author. Before replying to GitHub comments,
-it checks the authenticated `gh` user and never replies to comments authored by
-that user.
+comments from someone other than the pull request author. The monitor filters
+out self-authored reviews and unresolved threads before launching an agent. The
+comment-follow-up agent is instructed to verify the authenticated `gh` user
+before replying and not to reply to comments authored by that user.
 
 It is intended for a clean local checkout of the pull request branch. The
 monitor can update the branch from its configured base branch, launch the
@@ -106,8 +107,8 @@ precedence over environment variables; without either, `fix` uses `max` effort.
 `fix` polls every minute. After synchronization advances the pull
 request head, it waits for the next poll so GitHub can recognize the new
 commit and start its checks. It also performs one immediate follow-up poll
-whenever a repair, review, or comment agent exits. It stops when the pull
-request closes or when all checks pass without new review feedback. When
+whenever a repair, review, or comment agent exits. It stops when the
+pull request closes or when all checks pass without new review feedback. When
 checks are waiting or have no failures, it checks pull request reviews and
 unresolved inline review threads. Review and comment sessions summarize
 feedback with you, apply small clearly correct fixes, and pause for your
@@ -123,9 +124,9 @@ Before monitoring an open pull request, `fix` checks its CI status and
 mergeability. It updates the branch from the pull request's configured base
 branch only when CI has a failure or GitHub reports merge conflicts. If GitHub
 reports merge conflicts, it launches a bounded agent session to resolve them
-and retries the synchronization. It does not recursively update parent pull
-requests in a stack; update those from the root toward the monitored pull
-request.
+and retries the synchronization. It does not recursively update parent
+pull requests in a stack; update those from the root toward the monitored
+pull request.
 
 ## State and logs
 
