@@ -1,6 +1,7 @@
 import dataclasses
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -1030,6 +1031,17 @@ class AgentCommandTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        self.environment = mock.patch.dict(os.environ)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        for variable in (
+            fix.AGENT_ENV,
+            fix.AGENT_MODEL_ENV,
+            fix.AGENT_EFFORT_ENV,
+        ):
+            os.environ.pop(variable, None)
+
     def test_default_polling_interval_is_one_minute(self):
         self.assertEqual(fix.DEFAULT_INTERVAL, 60)
 
