@@ -2816,10 +2816,34 @@ class MonitorTests(unittest.TestCase):
             self.assertTrue(monitor.poll_once())
             self.assertEqual(agent.prompts, [])
 
-    def test_no_checks_and_no_reviews_stops(self):
+    def test_empty_reported_checks_wait_and_process_reviews_before_later_pass(self):
+        review = Review(
+            id="review-1",
+            author_login="maintainer",
+            state="COMMENTED",
+            body="Please handle this edge case.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha=self.pull_request.head_sha,
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
         with tempfile.TemporaryDirectory() as directory:
             state_store = StateStore(Path(directory) / "state.json")
-            github = FakeGitHub([self.pull_request], [], [])
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [],
+                [review],
+            )
+            github.get_checks = mock.Mock(side_effect=[[], [passed_check]])
             agent = FakeAgent()
             monitor = Monitor(
                 github=github,
@@ -2830,8 +2854,52 @@ class MonitorTests(unittest.TestCase):
                 runner=github.runner,
             )
 
+            self.assertFalse(monitor.poll_once())
+            self.assertEqual(github.review_calls, 1)
+            self.assertEqual(len(agent.prompts), 1)
+
             self.assertTrue(monitor.poll_once())
-            self.assertEqual(agent.prompts, [])
+            self.assertEqual(github.review_calls, 2)
+
+    def test_empty_initial_check_snapshot_waits_for_later_pass(self):
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [passed_check],
+            )
+            agent = FakeAgent()
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+                initial_check_snapshot=fix.CheckSnapshot(
+                    head_sha=self.pull_request.head_sha,
+                    checks_reported=True,
+                    checks=(),
+                ),
+            )
+
+            self.assertFalse(monitor.poll_once())
+            self.assertEqual(github.review_calls, 1)
+            self.assertEqual(github.check_calls, 0)
+
+            self.assertTrue(monitor.poll_once())
+            self.assertEqual(github.check_calls, 1)
 
     def test_unreported_checks_wait_without_stopping(self):
         with tempfile.TemporaryDirectory() as directory:
