@@ -67,7 +67,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
                 id
               }
             }
-            pageInfo {
+            commentsPageInfo: pageInfo {
               hasNextPage
               endCursor
             }
@@ -387,7 +387,11 @@ class GitHubClient:
                 f"Unexpected GraphQL review comment nodes: {thread}."
             )
         all_nodes = list(nodes)
-        page_info = comments.get("pageInfo") or {}
+        page_info = (
+            comments.get("commentsPageInfo")
+            or comments.get("pageInfo")
+            or {}
+        )
         if not isinstance(page_info, Mapping):
             raise MonitorError(
                 f"Unexpected GraphQL review comment page data: {thread}."

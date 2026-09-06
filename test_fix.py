@@ -1752,6 +1752,13 @@ class GitHubClientTests(unittest.TestCase):
                 if command[:3] != ["gh", "api", "graphql"]:
                     raise AssertionError(f"unexpected command: {command}")
                 if "--paginate" in command:
+                    query = next(
+                        value for value in command if value.startswith("query=")
+                    )
+                    if "commentsPageInfo: pageInfo" not in query:
+                        raise AssertionError(
+                            "nested comments pageInfo must be aliased"
+                        )
                     response = [
                         {
                             "data": {
@@ -1767,9 +1774,45 @@ class GitHubClientTests(unittest.TestCase):
                                                     "line": 42,
                                                     "comments": {
                                                         "nodes": first_page_comments,
-                                                        "pageInfo": {
+                                                        "commentsPageInfo": {
                                                             "hasNextPage": True,
                                                             "endCursor": "comments-cursor-1",
+                                                        },
+                                                    },
+                                                }
+                                            ],
+                                            "pageInfo": {
+                                                "hasNextPage": True,
+                                                "endCursor": "threads-cursor-1",
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "reviewThreads": {
+                                            "nodes": [
+                                                {
+                                                    "id": "thread-2",
+                                                    "isResolved": False,
+                                                    "isOutdated": False,
+                                                    "path": "src/other.py",
+                                                    "line": 7,
+                                                    "comments": {
+                                                        "nodes": [
+                                                            {
+                                                                "id": "other-comment-1",
+                                                                "author": {"login": "maintainer"},
+                                                                "body": "Another thread.",
+                                                            }
+                                                        ],
+                                                        "commentsPageInfo": {
+                                                            "hasNextPage": False,
+                                                            "endCursor": None,
                                                         },
                                                     },
                                                 }
@@ -1829,11 +1872,13 @@ class GitHubClientTests(unittest.TestCase):
             author_login="contributor",
         )
         runner = Runner()
-        thread = GitHubClient(
+        threads = GitHubClient(
             cwd=Path("/tmp/example-repo"),
             runner=runner,
-        ).get_review_threads(pull_request)[0]
+        ).get_review_threads(pull_request)
+        thread = threads[0]
 
+        self.assertEqual(len(threads), 2)
         self.assertEqual(len(thread.comments), 101)
         self.assertEqual(thread.latest_comment.body, "Please handle this late reply.")
         truncated = dataclasses.replace(thread, comments=thread.comments[:100])
