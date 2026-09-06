@@ -45,8 +45,13 @@ from .github import (
 )
 from .monitor import Monitor
 from .models import PullRequest
-from .repository import ensure_pull_request_branch
-from .state import StateStore, default_state_path, state_lock
+from .repository import ensure_pull_request_branch, local_git_value
+from .state import (
+    StateStore,
+    default_state_path,
+    state_lock,
+    worktree_lock as acquire_worktree_lock,
+)
 from .ui import (
     CONSOLE,
     FixHighlighter,
@@ -280,6 +285,7 @@ class RunDependencies:
     monitor_factory: Callable[..., Monitor]
     sleep_until_next_poll: Callable[..., None]
     render_monitor_header: Callable[..., bool] = render_header
+    worktree_lock: Callable[..., Any] = acquire_worktree_lock
 
 
 def _default_dependencies() -> RunDependencies:
@@ -311,12 +317,44 @@ def run(
     dependencies: Optional[RunDependencies] = None,
 ) -> int:
     deps = dependencies or _default_dependencies()
+    workdir = Path.cwd().resolve()
+    runner = deps.command_runner_factory()
+    worktree_root = Path(
+        local_git_value(runner, workdir, ["rev-parse", "--show-toplevel"])
+    )
+    with deps.worktree_lock(worktree_root):
+        return _run_locked(
+            agent=agent,
+            model=model,
+            effort=effort,
+            verbose=verbose,
+            force_sync=force_sync,
+            pull_request_url=pull_request_url,
+            dependencies=deps,
+            workdir=workdir,
+            runner=runner,
+        )
+
+
+def _run_locked(
+    *,
+    agent: str = DEFAULT_AGENT,
+    model: str = DEFAULT_AGENT_MODEL,
+    effort: str = DEFAULT_AGENT_EFFORT,
+    verbose: bool = False,
+    force_sync: bool = False,
+    pull_request_url: Optional[str] = None,
+    dependencies: Optional[RunDependencies] = None,
+    workdir: Optional[Path] = None,
+    runner: Optional[CommandRunner] = None,
+) -> int:
+    deps = dependencies or _default_dependencies()
     agent = normalize_agent(agent)
     model = resolve_agent_model(agent, model)
     deps.configure_logging()
     started_at = time.monotonic()
-    workdir = Path.cwd().resolve()
-    runner = deps.command_runner_factory()
+    workdir = workdir or Path.cwd().resolve()
+    runner = runner or deps.command_runner_factory()
     github = deps.github_client_factory(cwd=workdir, runner=runner)
     if pull_request_url is None:
         initial_pull_request = github.get_pull_request()
