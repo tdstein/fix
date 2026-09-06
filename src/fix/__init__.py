@@ -93,7 +93,14 @@ from .repository import (
     synchronize_pull_request,
     validate_agent_checkout,
 )
-from .state import StateStore, default_state_path, state_lock, timestamp
+from .state import (
+    StateStore,
+    default_state_path,
+    default_worktree_lock_path,
+    state_lock,
+    timestamp,
+    worktree_lock,
+)
 from .ui import FixHighlighter, build_monitor_header, render_monitor_header
 
 
@@ -174,6 +181,7 @@ def run(
             state_store_factory=StateStore,
             agent_launcher_factory=AgentLauncher,
             state_lock=state_lock,
+            worktree_lock=worktree_lock,
             inspect_startup=inspect_startup,
             log_startup_decision=log_startup_decision,
             synchronize_with_conflict_resolution=(
@@ -260,6 +268,7 @@ __all__ = [
     "build_monitor_header",
     "configure_logging",
     "default_state_path",
+    "default_worktree_lock_path",
     "fetch_review_threads",
     "format_ci_check",
     "format_mergeability",
@@ -287,6 +296,7 @@ __all__ = [
     "synchronize_pull_request",
     "synchronize_with_conflict_resolution",
     "timestamp",
+    "worktree_lock",
     "ensure_pull_request_branch",
     "validate_agent_checkout",
 ]

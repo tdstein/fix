@@ -35,6 +35,14 @@ def ensure_pull_request_branch(
     if current_branch == pull_request.head_branch:
         return False
 
+    dirty = local_git_value(runner, workdir, ["status", "--porcelain"])
+    if dirty:
+        raise MonitorError(
+            "Refusing to switch the checkout to the pull request branch: "
+            "checkout has uncommitted changes; preserve or clean them before "
+            "running fix."
+        )
+
     checkout_command = ["gh", "pr", "checkout", str(pull_request.number)]
     result = runner.run(checkout_command, cwd=workdir)
     if result.returncode != 0:

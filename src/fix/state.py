@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,19 @@ def default_state_path(repo: str, number: int) -> Path:
     )
     repo_slug = quote(repo, safe="")
     return Path(cache_root) / "fix" / f"{repo_slug}-pr-{number}.json"
+
+
+def default_worktree_lock_path(worktree_root: Path) -> Path:
+    """Return the process lock path for one Git worktree."""
+
+    cache_root = (
+        os.environ.get("XDG_STATE_HOME")
+        or os.environ.get("XDG_CACHE_HOME")
+        or str(Path.home() / ".cache")
+    )
+    canonical_root = str(worktree_root.resolve())
+    worktree_id = hashlib.sha256(canonical_root.encode()).hexdigest()
+    return Path(cache_root) / "fix" / "worktrees" / f"{worktree_id}.lock"
 
 
 class StateStore:
@@ -80,6 +94,25 @@ def state_lock(path: Path) -> Iterator[None]:
     """Prevent two monitor processes from launching agents concurrently."""
 
     lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise MonitorError(
+                f"Another fix process already holds {lock_path}."
+            ) from error
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def worktree_lock(worktree_root: Path) -> Iterator[None]:
+    """Prevent concurrent fix processes from mutating one Git worktree."""
+
+    lock_path = default_worktree_lock_path(worktree_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+") as lock_file:
         try:

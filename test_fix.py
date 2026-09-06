@@ -448,6 +448,23 @@ class StateStoreTests(unittest.TestCase):
             default_state_path("foo-bar/baz", 123),
         )
 
+    def test_worktree_locks_share_roots_but_not_independent_worktrees(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_home = Path(directory) / "state"
+            root = Path(directory) / "checkout"
+            linked_root = Path(directory) / "linked-checkout"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                self.assertNotEqual(
+                    fix.default_worktree_lock_path(root),
+                    fix.default_worktree_lock_path(linked_root),
+                )
+                with fix.worktree_lock(root):
+                    with fix.worktree_lock(linked_root):
+                        pass
+                    with self.assertRaises(fix.MonitorError):
+                        with fix.worktree_lock(root):
+                            pass
+
     def test_save_and_load_is_json(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -504,6 +521,22 @@ class RunTests(unittest.TestCase):
         monitor.agents_launched = 0
         lock = mock.MagicMock()
         lock.__enter__.return_value = lock
+        events = []
+
+        def lock_worktree(root):
+            events.append(("lock", root))
+            worktree_lock = mock.MagicMock()
+            worktree_lock.__enter__.side_effect = lambda: events.append(
+                ("entered", root)
+            )
+            worktree_lock.__exit__.side_effect = lambda *args: events.append(
+                ("exited", root)
+            )
+            return worktree_lock
+
+        def ensure_branch(**kwargs):
+            self.assertEqual(events[1][0], "entered")
+            return True
 
         with mock.patch("fix.configure_logging"), \
             mock.patch("fix.GitHubClient", return_value=github), \
@@ -511,9 +544,10 @@ class RunTests(unittest.TestCase):
             mock.patch("fix.AgentLauncher"), \
             mock.patch("fix.Monitor", return_value=monitor), \
             mock.patch("fix.state_lock", return_value=lock), \
+            mock.patch("fix.worktree_lock", side_effect=lock_worktree), \
             mock.patch(
                 "fix.cli.ensure_pull_request_branch",
-                return_value=True,
+                side_effect=ensure_branch,
             ) as ensure_branch:
             self.assertEqual(
                 fix.run(pull_request_url=pull_request_url),
@@ -1199,6 +1233,8 @@ class PullRequestBranchTests(unittest.TestCase):
                         f"{self.branch}\n",
                         "",
                     )
+                if command == ["git", "status", "--porcelain"]:
+                    return subprocess.CompletedProcess(command, 0, "", "")
                 if command == ["gh", "pr", "checkout", "123"]:
                     self.branch = "fix-ci"
                     return subprocess.CompletedProcess(command, 0, "", "")
@@ -1216,6 +1252,7 @@ class PullRequestBranchTests(unittest.TestCase):
             [command for command, _ in runner.calls],
             [
                 ["git", "branch", "--show-current"],
+                ["git", "status", "--porcelain"],
                 ["gh", "pr", "checkout", "123"],
                 ["git", "branch", "--show-current"],
             ],
@@ -1238,6 +1275,36 @@ class PullRequestBranchTests(unittest.TestCase):
         )
 
         self.assertFalse(changed)
+
+    def test_refuses_to_switch_a_dirty_checkout(self):
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, command, *, cwd=None):
+                self.calls.append((command, cwd))
+                if command == ["git", "branch", "--show-current"]:
+                    return subprocess.CompletedProcess(command, 0, "main\n", "")
+                if command == ["git", "status", "--porcelain"]:
+                    return subprocess.CompletedProcess(command, 0, " M file.py\n", "")
+                raise AssertionError(f"unexpected command: {command}")
+
+        runner = Runner()
+        with self.assertRaises(fix.MonitorError) as context:
+            fix.ensure_pull_request_branch(
+                runner=runner,
+                workdir=Path("/tmp/example-repo"),
+                pull_request=self.pull_request,
+            )
+
+        self.assertIn("uncommitted changes", str(context.exception))
+        self.assertEqual(
+            [command for command, _ in runner.calls],
+            [
+                ["git", "branch", "--show-current"],
+                ["git", "status", "--porcelain"],
+            ],
+        )
 
 
 class AgentLauncherTests(unittest.TestCase):
