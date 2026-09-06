@@ -614,7 +614,8 @@ class RunTests(unittest.TestCase):
                 mock.patch("fix.AgentLauncher"), \
                 mock.patch("fix.Monitor", return_value=monitor) as monitor_factory, \
                 mock.patch("fix.synchronize_pull_request") as synchronize, \
-                mock.patch("fix.state_lock", return_value=lock):
+                mock.patch("fix.state_lock", return_value=lock), \
+                mock.patch("fix.cli.time.monotonic", side_effect=[100.0, 100.0]):
                 self.assertEqual(fix.run(), 0)
 
         synchronize.assert_not_called()
