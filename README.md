@@ -145,6 +145,17 @@ The logs contain launcher metadata only. The agent conversation and the
 subprocess's standard output and standard error are not captured in these
 files; the subprocess inherits the terminal's standard streams instead.
 
+Agent sessions have a fixed two-hour timeout. When an agent reaches that limit,
+`fix` terminates the entire agent process group, records the timeout in the
+session log, and treats the session as timed out.
+
+CI repair attempts are limited to ten per pull-request head. The count is
+stored in persistent state, so restarting `fix` does not reset it. Once the
+limit is reached, `fix` suppresses further repair-agent launches for that head
+while monitoring continues: it still observes CI, reviews, and unresolved
+inline review threads. These limits are fixed operational defaults and do not
+have CLI flags or environment-variable overrides.
+
 ## Security considerations
 
 Run `fix` only in repositories and worktrees you trust. The repair, review, and
