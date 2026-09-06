@@ -67,6 +67,46 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
                 id
               }
             }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+
+REVIEW_THREAD_COMMENTS_QUERY = """
+query($threadId: ID!, $endCursor: String!) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $endCursor) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+          url
+          path
+          line
+          originalLine
+          diffHunk
+          author {
+            login
+          }
+          commit {
+            oid
+          }
+          replyTo {
+            id
           }
         }
         pageInfo {
@@ -321,10 +361,86 @@ class GitHubClient:
                 raise MonitorError(
                     f"Unexpected GraphQL review thread nodes: {page}."
                 )
-            threads.extend(
-                ReviewThread.from_json(thread)
-                for thread in values
-                if isinstance(thread, Mapping)
-            )
+            for thread in values:
+                if not isinstance(thread, Mapping):
+                    continue
+                thread_data = dict(thread)
+                thread_data["comments"] = self._load_all_review_comments(
+                    thread_data,
+                )
+                threads.append(ReviewThread.from_json(thread_data))
 
         return threads
+
+    def _load_all_review_comments(
+        self,
+        thread: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        comments = thread.get("comments") or {}
+        if not isinstance(comments, Mapping):
+            raise MonitorError(
+                f"Unexpected GraphQL review comment data: {thread}."
+            )
+        nodes = comments.get("nodes") or []
+        if not isinstance(nodes, list):
+            raise MonitorError(
+                f"Unexpected GraphQL review comment nodes: {thread}."
+            )
+        all_nodes = list(nodes)
+        page_info = comments.get("pageInfo") or {}
+        if not isinstance(page_info, Mapping):
+            raise MonitorError(
+                f"Unexpected GraphQL review comment page data: {thread}."
+            )
+
+        thread_id = str(thread.get("id") or "")
+        while page_info.get("hasNextPage"):
+            cursor = page_info.get("endCursor")
+            if not thread_id or not cursor:
+                raise MonitorError(
+                    f"Unexpected GraphQL review comment cursor data: {thread}."
+                )
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={REVIEW_THREAD_COMMENTS_QUERY}",
+                "-F",
+                f"threadId={thread_id}",
+                "-F",
+                f"endCursor={cursor}",
+            ]
+            result = self.runner.run(command, cwd=self.cwd)
+            value = _parse_json_output(result, command)
+            if not isinstance(value, Mapping):
+                raise MonitorError(f"Unexpected GraphQL data from gh: {value}.")
+            errors = value.get("errors")
+            if errors:
+                raise MonitorError(f"GitHub GraphQL request failed: {errors}.")
+            data = value.get("data")
+            if not isinstance(data, Mapping):
+                raise MonitorError(f"Unexpected GraphQL data from gh: {value}.")
+            node = data.get("node")
+            if not isinstance(node, Mapping):
+                raise MonitorError(
+                    f"Unexpected GraphQL review thread data: {value}."
+                )
+            next_comments = node.get("comments")
+            if not isinstance(next_comments, Mapping):
+                raise MonitorError(
+                    f"Unexpected GraphQL review comment data: {value}."
+                )
+            next_nodes = next_comments.get("nodes") or []
+            if not isinstance(next_nodes, list):
+                raise MonitorError(
+                    f"Unexpected GraphQL review comment nodes: {value}."
+                )
+            all_nodes.extend(next_nodes)
+            page_info = next_comments.get("pageInfo") or {}
+            if not isinstance(page_info, Mapping):
+                raise MonitorError(
+                    f"Unexpected GraphQL review comment page data: {value}."
+                )
+
+        return {"nodes": all_nodes}

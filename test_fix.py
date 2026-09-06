@@ -1726,6 +1726,127 @@ class GitHubClientTests(unittest.TestCase):
             "--slurp",
         ])
 
+    def test_review_thread_comments_are_paginated_into_key_and_prompt(self):
+        first_page_comments = [
+            {
+                "id": f"comment-{index}",
+                "author": {"login": "maintainer"},
+                "body": f"Earlier comment {index}.",
+            }
+            for index in range(100)
+        ]
+
+        class Runner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, command, *, cwd=None):
+                self.calls.append((command, cwd))
+                if command[:3] == ["gh", "repo", "view"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "example-org/example-repo\n",
+                        "",
+                    )
+                if command[:3] != ["gh", "api", "graphql"]:
+                    raise AssertionError(f"unexpected command: {command}")
+                if "--paginate" in command:
+                    response = [
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "reviewThreads": {
+                                            "nodes": [
+                                                {
+                                                    "id": "thread-1",
+                                                    "isResolved": False,
+                                                    "isOutdated": False,
+                                                    "path": "src/app.py",
+                                                    "line": 42,
+                                                    "comments": {
+                                                        "nodes": first_page_comments,
+                                                        "pageInfo": {
+                                                            "hasNextPage": True,
+                                                            "endCursor": "comments-cursor-1",
+                                                        },
+                                                    },
+                                                }
+                                            ],
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                else:
+                    if "threadId=thread-1" not in command:
+                        raise AssertionError(f"unexpected command: {command}")
+                    if "endCursor=comments-cursor-1" not in command:
+                        raise AssertionError(f"unexpected command: {command}")
+                    response = {
+                        "data": {
+                            "node": {
+                                "comments": {
+                                    "nodes": [
+                                        {
+                                            "id": "comment-100",
+                                            "author": {"login": "maintainer"},
+                                            "body": "Please handle this late reply.",
+                                            "replyTo": {"id": "comment-99"},
+                                        }
+                                    ],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    json.dumps(response),
+                    "",
+                )
+
+        pull_request = PullRequest(
+            repo="example-org/example-repo",
+            number=123,
+            title="Example",
+            url="https://github.com/example-org/example-repo/pull/123",
+            state="OPEN",
+            merged_at=None,
+            head_sha="abc123",
+            head_branch="fix-ci",
+            base_branch="main",
+            author_login="contributor",
+        )
+        runner = Runner()
+        thread = GitHubClient(
+            cwd=Path("/tmp/example-repo"),
+            runner=runner,
+        ).get_review_threads(pull_request)[0]
+
+        self.assertEqual(len(thread.comments), 101)
+        self.assertEqual(thread.latest_comment.body, "Please handle this late reply.")
+        truncated = dataclasses.replace(thread, comments=thread.comments[:100])
+        self.assertNotEqual(thread.review_thread_key(), truncated.review_thread_key())
+        prompt = build_review_comment_prompt(
+            pull_request,
+            [(thread.review_thread_key(), thread)],
+            workdir=Path("/tmp/example-repo"),
+            current_user_login="taylor",
+        )
+        self.assertIn("Please handle this late reply.", prompt)
+        self.assertEqual(len(runner.calls), 3)
+
     def test_unreported_checks_are_identified_as_transient(self):
         class Runner:
             def run(self, command, *, cwd=None):
