@@ -8,13 +8,13 @@ PYTHON ?= $(UV) run --locked python
 .PHONY: install dev uninstall test
 
 install:
-	$(UV) tool install --force --refresh "$(PROJECT_DIR)"
+	$(UV) tool install --force --refresh .
 
 dev:
-	$(UV) tool install --force --editable "$(PROJECT_DIR)"
+	$(UV) tool install --force --editable .
 
 uninstall:
 	$(UV) tool uninstall fix
 
 test:
-	cd "$(PROJECT_DIR)" && $(PYTHON) -m unittest discover -v
+	$(PYTHON) -m unittest discover -v
