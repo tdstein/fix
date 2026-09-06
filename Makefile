@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 
-PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-INSTALL_DIR := $(HOME)/.local/bin
+# Preserve spaces in the path; GNU make 3.81 prefixes MAKEFILE_LIST with a space.
+PROJECT_DIR := $(shell makefile="$(MAKEFILE_LIST)"; makefile=$${makefile\# }; cd "$$(dirname "$$makefile")" && pwd)
 UV ?= uv
 PYTHON ?= $(UV) run --locked python
 
@@ -14,8 +14,7 @@ dev:
 	$(UV) tool install --force --editable "$(PROJECT_DIR)"
 
 uninstall:
-	-$(UV) tool uninstall fix
-	rm -f "$(INSTALL_DIR)/fix" "$(INSTALL_DIR)/fix.py"
+	$(UV) tool uninstall fix
 
 test:
-	$(PYTHON) -m unittest discover -v
+	cd "$(PROJECT_DIR)" && $(PYTHON) -m unittest discover -v
