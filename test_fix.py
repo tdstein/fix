@@ -1871,12 +1871,13 @@ class FakeGitHub:
 
 
 class FakeAgent:
-    def __init__(self):
+    def __init__(self, returncode=0):
         self.prompts = []
+        self.returncode = returncode
 
     def launch(self, prompt, log_path):
         self.prompts.append((prompt, log_path))
-        return 0
+        return self.returncode
 
 
 class MonitorTests(unittest.TestCase):
@@ -2170,6 +2171,57 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("➜ Agent review", output)
         self.assertIn("review @maintainer: Please handle this edge case.", output)
 
+    def test_failed_review_agent_keeps_feedback_unseen_and_waits(self):
+        review = Review(
+            id="review-1",
+            author_login="maintainer",
+            state="CHANGES_REQUESTED",
+            body="Please handle this edge case.",
+            submitted_at="2026-08-14T12:00:00Z",
+            commit_sha=self.pull_request.head_sha,
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [passed_check],
+                [review],
+            )
+            agent = FakeAgent(returncode=1)
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            with self.assertLogs(fix.LOGGER, level="ERROR") as logs:
+                self.assertFalse(monitor.poll_once())
+
+            self.assertFalse(monitor.poll_again_immediately)
+            self.assertEqual(state_store.load()["seen_reviews"], {})
+            self.assertIn(
+                "Agent review failed with exit code 1",
+                "\n".join(logs.output),
+            )
+
+            monitor.poll_once()
+
+        self.assertEqual(len(agent.prompts), 2)
+
     def test_passed_ci_launches_agent_for_a_new_unresolved_comment(self):
         thread = ReviewThread(
             id="thread-1",
@@ -2226,6 +2278,63 @@ class MonitorTests(unittest.TestCase):
         output = "\n".join(logs.output)
         self.assertIn("➜ Agent comment", output)
         self.assertIn("comment @maintainer src/app.py:42", output)
+
+    def test_timed_out_comment_agent_keeps_feedback_unseen_and_waits(self):
+        thread = ReviewThread(
+            id="thread-1",
+            is_resolved=False,
+            path="src/app.py",
+            line=42,
+            comments=(
+                ReviewComment(
+                    id="comment-1",
+                    author_login="maintainer",
+                    body="Handle this edge case.",
+                    commit_sha=self.pull_request.head_sha,
+                ),
+            ),
+        )
+        passed_check = Check(
+            name="ci",
+            state="SUCCESS",
+            bucket="pass",
+            workflow="ci",
+            link="",
+            started_at="2026-08-14T12:00:00Z",
+            completed_at="2026-08-14T12:10:00Z",
+            description="",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_store = StateStore(Path(directory) / "state.json")
+            github = FakeGitHub(
+                [self.pull_request, self.pull_request],
+                [passed_check],
+                review_threads=[thread],
+            )
+            agent = FakeAgent(returncode=124)
+            monitor = Monitor(
+                github=github,
+                target="123",
+                workdir=Path(directory),
+                state_store=state_store,
+                agent_launcher=agent,
+                runner=github.runner,
+            )
+
+            with self.assertLogs(fix.LOGGER, level="ERROR") as logs:
+                self.assertFalse(monitor.poll_once())
+
+            self.assertFalse(monitor.poll_again_immediately)
+            self.assertEqual(state_store.load()["seen_comments"], {})
+            self.assertIn(
+                "Agent comment failed with exit code 124",
+                "\n".join(logs.output),
+            )
+
+            monitor.poll_once()
+
+        self.assertEqual(len(agent.prompts), 2)
 
     def test_waiting_ci_also_checks_for_reviews(self):
         review = Review(

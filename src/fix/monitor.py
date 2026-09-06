@@ -458,7 +458,7 @@ class Monitor:
                 body,
             )
         returncode = self.agent_launcher.launch(prompt, log_path)
-        self.poll_again_immediately = True
+        self.poll_again_immediately = returncode == 0
 
         if (
             self._verify_agent_result(
@@ -470,9 +470,10 @@ class Monitor:
         ):
             return False
 
-        for key, _ in new_comments:
-            seen_comments[key] = {"seen_at": timestamp()}
-        self._prune_seen_items(seen_comments)
+        if returncode == 0:
+            for key, _ in new_comments:
+                seen_comments[key] = {"seen_at": timestamp()}
+            self._prune_seen_items(seen_comments)
         self.state_store.save(state)
         self._log_agent_result(agent_kind="comment", returncode=returncode)
         return False
@@ -530,7 +531,7 @@ class Monitor:
                 body,
             )
         returncode = self.agent_launcher.launch(prompt, log_path)
-        self.poll_again_immediately = True
+        self.poll_again_immediately = returncode == 0
 
         if (
             self._verify_agent_result(
@@ -542,9 +543,10 @@ class Monitor:
         ):
             return False
 
-        for key, _ in new_reviews:
-            seen_reviews[key] = {"seen_at": timestamp()}
-        self._prune_seen_items(seen_reviews)
+        if returncode == 0:
+            for key, _ in new_reviews:
+                seen_reviews[key] = {"seen_at": timestamp()}
+            self._prune_seen_items(seen_reviews)
         self.state_store.save(state)
         self._log_agent_result(agent_kind="review", returncode=returncode)
         return False
