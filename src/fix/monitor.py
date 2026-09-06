@@ -374,6 +374,8 @@ class Monitor:
             ),
             log_path=log_path,
         )
+        attempts_by_head[pull_request.head_sha] = attempts + 1
+        self.state_store.save(state)
         returncode = self.agent_launcher.launch(prompt, log_path)
         self.poll_again_immediately = True
 
@@ -387,7 +389,6 @@ class Monitor:
         ):
             return False
 
-        attempts_by_head[pull_request.head_sha] = attempts + 1
         seen_at = timestamp()
         for key, check in new_failures:
             seen_failures[key] = {"seen_at": seen_at}
